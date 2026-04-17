@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lilin Player (Simple)</title>
+    <style>
+        body {
+            background: #0f0f0f; color: #ddd; font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            margin: 0; display: flex; flex-direction: column; height: 100vh; overflow: hidden;
+        }
+        header {
+            text-align: center; padding: 20px; background: #1a1a1a;
+            border-bottom: 1px solid #333; flex-shrink: 0;
+        }
+        #track-name { font-size: 1.1rem; font-weight: bold; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; height: 1.4em; }
+
+        main {
+            flex: 1; display: flex; flex-direction: column; align-items: center;
+            padding: 20px; overflow: hidden;
+        }
+        #audio-player { width: 100%; max-width: 600px; margin-bottom: 20px; filter: invert(1) hue-rotate(180deg) brightness(1.5); flex-shrink: 0; }
+        
+        #playlist-container {
+            width: 100%; max-width: 600px; flex: 1; overflow-y: auto;
+            border-top: 1px solid #333; border-bottom: 1px solid #333;
+        }
+        #playlist { list-style: none; padding: 0; margin: 0; }
+        
+        .track-item {
+            padding: 12px 15px; border-bottom: 1px solid #222; cursor: pointer;
+            display: flex; justify-content: space-between; align-items: center;
+            font-size: 0.9rem; transition: 0.2s;
+        }
+        .track-item:hover { background: #222; }
+        .track-item.active { color: #a855f7; background: #1a1a1a; font-weight: bold; border-left: 4px solid #a855f7; }
+
+        .delete-btn {
+            opacity: 0; background: rgba(255, 68, 68, 0.1); color: #ff4444; border: 1px solid #ff4444;
+            padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; transition: 0.2s;
+            cursor: pointer;
+        }
+        .track-item:hover .delete-btn { opacity: 1; }
+        .delete-btn:hover { background: #ff4444; color: #fff; }
+
+        footer {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 15px 25px; background: #1a1a1a; border-top: 1px solid #333;
+            font-family: 'JetBrains Mono', 'Courier New', monospace; font-size: 0.8rem; flex-shrink: 0;
+        }
+        .status-area { color: #888; display: flex; align-items: center; }
+        .status-online { color: #4ade80; font-weight: bold; }
+        .controls { display: flex; gap: 10px; }
+        
+        .btn {
+            background: #333; color: #eee; border: 1px solid #444;
+            padding: 8px 15px; cursor: pointer; border-radius: 4px; transition: 0.2s;
+        }
+        .btn:hover { background: #444; border-color: #666; }
+
+        /* Toggle Switch */
+        .switch {
+            position: relative; display: inline-block;
+            width: 34px; height: 20px; margin-right: 10px;
+        }
+        .switch input { opacity: 0; width: 0; height: 0; }
+        .slider {
+            position: absolute; cursor: pointer;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background-color: #333; transition: .4s; border-radius: 20px;
+            border: 1px solid #444;
+        }
+        .slider:before {
+            position: absolute; content: "";
+            height: 14px; width: 14px; left: 2px; bottom: 2px;
+            background-color: #888; transition: .4s; border-radius: 50%;
+        }
+        input:checked + .slider { background-color: #a855f7; border-color: #c084fc; }
+        input:checked + .slider:before { transform: translateX(14px); background-color: white; }
+        
+        #file-input, #folder-input { display: none; }
+    </style>
+</head>
+<body>
+
+    <header>
+        <div id="track-name">No Track Selected</div>
+    </header>
+
+    <main>
+        <audio id="audio-player" controls></audio>
+        <div id="playlist-container">
+            <div id="playlist"></div>
+        </div>
+    </main>
+
+    <footer>
+        <div class="status-area">
+            <label class="switch">
+                <input type="checkbox" id="engine-toggle" checked onchange="toggleEngine()">
+                <span class="slider"></span>
+            </label>
+            Lilin Engine: <span id="engine-status">OFFLINE</span>
+        </div>
+        <div class="controls">
+            <button class="btn" onclick="document.getElementById('file-input').click()">Add Files</button>
+            <button class="btn" onclick="document.getElementById('folder-input').click()">Add Folder</button>
+        </div>
+    </footer>
+
+    <input type="file" id="file-input" multiple accept="audio/*">
+    <input type="file" id="folder-input" webkitdirectory directory multiple>
+
+    <script>
+        let audioCtx = null;
+        let dspNode = null;
+        let mediaSource = null;
+        let isEngineEnabled = true;
+        const audioEl = document.getElementById('audio-player');
+        const playlistEl = document.getElementById('playlist');
+        const trackNameEl = document.getElementById('track-name');
+        const statusEl = document.getElementById('engine-status');
+
+        let queue = [];
+        let currentIndex = -1;
+        let currentObjectURL = null;
+
+        async function initLilin() {
+            if (audioCtx) return;
+            try {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
+                await audioCtx.audioWorklet.addModule('processor.js');
+
+                const wasmRes = await fetch('processor.wasm');
+                const wasmBuffer = await wasmRes.arrayBuffer();
+                const wasmModule = await WebAssembly.compile(wasmBuffer);
+
+                dspNode = new AudioWorkletNode(audioCtx, 'delta-sigma-processor', {
+                    processorOptions: { wasmModule }
+                });
+
+                mediaSource = audioCtx.createMediaElementSource(audioEl);
+                updateEngineConnection();
+
+                statusEl.className = "status-online";
+                console.log("Lilin Engine initialized.");
+            } catch (e) {
+                console.error("Lilin Init Error:", e);
+                statusEl.textContent = "ERROR";
+            }
+        }
+
+        function updateEngineConnection() {
+            if (!mediaSource) return;
+            mediaSource.disconnect();
+            if (dspNode) dspNode.disconnect();
+
+            if (isEngineEnabled && dspNode) {
+                mediaSource.connect(dspNode).connect(audioCtx.destination);
+                statusEl.textContent = "7th-order ΔΣ ONLINE";
+            } else {
+                mediaSource.connect(audioCtx.destination);
+                statusEl.textContent = "BYPASS";
+            }
+        }
+
+        function toggleEngine() {
+            isEngineEnabled = document.getElementById('engine-toggle').checked;
+            if (audioCtx) {
+                updateEngineConnection();
+            }
+        }
+
+        function handleFiles(files) {
+            const filtered = Array.from(files)
+                .filter(f => f.name.match(/\.(mp3|wav|flac|aac|ogg|m4a)$/i))
+                .sort((a, b) => a.name.localeCompare(b.name, 'ja'));
+
+            if (filtered.length === 0) return;
+
+            filtered.forEach(file => {
+                queue.push({ file, name: file.name });
+            });
+
+            renderPlaylist();
+            if (currentIndex === -1) playTrack(0);
+        }
+
+        async function playTrack(index) {
+            if (index < 0 || index >= queue.length) return;
+            if (!audioCtx) await initLilin();
+            if (audioCtx.state === 'suspended') await audioCtx.resume();
+
+            currentIndex = index;
+            const track = queue[index];
+            
+            if (currentObjectURL) URL.revokeObjectURL(currentObjectURL);
+            currentObjectURL = URL.createObjectURL(track.file);
+            audioEl.src = currentObjectURL;
+            trackNameEl.textContent = track.name;
+            
+            renderPlaylist();
+            audioEl.play().catch(e => console.log("Playback failed:", e));
+        }
+
+        function deleteTrack(index, e) {
+            e.stopPropagation();
+            const wasPlaying = (index === currentIndex);
+            queue.splice(index, 1);
+            if (wasPlaying) {
+                audioEl.pause();
+                audioEl.src = '';
+                trackNameEl.textContent = 'No Track Selected';
+                currentIndex = -1;
+            } else if (index < currentIndex) {
+                currentIndex--;
+            }
+            renderPlaylist();
+        }
+
+        function renderPlaylist() {
+            playlistEl.innerHTML = '';
+            queue.forEach((track, i) => {
+                const item = document.createElement('div');
+                item.className = 'track-item' + (i === currentIndex ? ' active' : '');
+                const label = document.createElement('span');
+                label.textContent = track.name;
+                const delBtn = document.createElement('button');
+                delBtn.className = 'delete-btn';
+                delBtn.textContent = '✕';
+                delBtn.onclick = (e) => deleteTrack(i, e);
+                item.appendChild(label);
+                item.appendChild(delBtn);
+                item.onclick = () => playTrack(i);
+                playlistEl.appendChild(item);
+            });
+        }
+
+        document.getElementById('file-input').onchange = e => handleFiles(e.target.files);
+        document.getElementById('folder-input').onchange = e => handleFiles(e.target.files);
+        audioEl.onended = () => {
+            if (currentIndex < queue.length - 1) playTrack(currentIndex + 1);
+        };
+    </script>
+</body>
+</html>
