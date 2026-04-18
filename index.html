@@ -127,11 +127,21 @@
 
         async function initLilin() {
             if (audioCtx) return;
+
+            // Security check: AudioWorklet and Fetch(WASM) require a web server (http/https)
+            if (window.location.protocol === 'file:') {
+                statusEl.textContent = "ERROR: Use a web server (npm run dev)";
+                statusEl.style.color = "#ff4444";
+                return;
+            }
+
             try {
                 audioCtx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
                 await audioCtx.audioWorklet.addModule('processor.js');
 
                 const wasmRes = await fetch('processor.wasm');
+                if (!wasmRes.ok) throw new Error("Failed to load WASM");
+                
                 const wasmBuffer = await wasmRes.arrayBuffer();
                 const wasmModule = await WebAssembly.compile(wasmBuffer);
 
@@ -143,10 +153,14 @@
                 updateEngineConnection();
 
                 statusEl.className = "status-online";
+                statusEl.style.color = ""; // Reset
                 console.log("Lilin Engine initialized.");
             } catch (e) {
                 console.error("Lilin Init Error:", e);
-                statusEl.textContent = "ERROR";
+                statusEl.textContent = "ERROR: Init Failed";
+                statusEl.className = "";
+                statusEl.style.color = "#ff4444";
+                dspNode = null;
             }
         }
 
@@ -156,11 +170,17 @@
             if (dspNode) dspNode.disconnect();
 
             if (isEngineEnabled && dspNode) {
-                mediaSource.connect(dspNode).connect(audioCtx.destination);
-                statusEl.textContent = "7th-order ΔΣ ONLINE";
+                try {
+                    mediaSource.connect(dspNode).connect(audioCtx.destination);
+                    statusEl.textContent = "7th-order ΔΣ ONLINE";
+                } catch (e) {
+                    console.error("Link error:", e);
+                    mediaSource.connect(audioCtx.destination);
+                    statusEl.textContent = "ERROR (Link failed)";
+                }
             } else {
                 mediaSource.connect(audioCtx.destination);
-                statusEl.textContent = "BYPASS";
+                statusEl.textContent = dspNode ? "BYPASS" : "OFFLINE";
             }
         }
 
