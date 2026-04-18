@@ -12,7 +12,9 @@ class DeltaSigmaProcessor extends AudioWorkletProcessor {
         this.params = {
             targetLevel: 0.70,
             expansionDepth: 1.15,
-            aggression: 0.70
+            aggression: 0.70,
+            exciteAmount: 0.30,  // 歪みの深さ（0=オフ、0.15〜0.30が実用域）
+            exciteMix: 0.15,     // 混合量（0.05〜0.15）
         };
 
         this.initialized = false;
@@ -47,8 +49,8 @@ class DeltaSigmaProcessor extends AudioWorkletProcessor {
             this.wasmOutputR = new Float32Array(this.memory.buffer, this.outputRPtr, 128);
 
             // ③ stateの初期化サイズを修正（14要素 = i1〜i7, fb, curPeak, h0〜h3, lastGain）
-            new Float32Array(this.memory.buffer, this.stateLPtr, 14).fill(0);
-            new Float32Array(this.memory.buffer, this.stateRPtr, 14).fill(0);
+            new Float32Array(this.memory.buffer, this.stateLPtr, 15).fill(0);
+            new Float32Array(this.memory.buffer, this.stateRPtr, 15).fill(0);
             // historyの初期化（taps要素、×4はbyte数なので不要）
             new Float32Array(this.memory.buffer, this.historyLPtr, this.taps).fill(0);
             new Float32Array(this.memory.buffer, this.historyRPtr, this.taps).fill(0);
@@ -76,7 +78,8 @@ class DeltaSigmaProcessor extends AudioWorkletProcessor {
             this.sincTablePtr, this.historyLPtr, this.historyRPtr,
             this.stateLPtr, this.stateRPtr,
             bufferLen, this.oversampleFactor, this.taps,
-            this.params.targetLevel, this.params.expansionDepth, this.params.aggression, sampleRate || 44100
+            this.params.targetLevel, this.params.expansionDepth, this.params.aggression, sampleRate || 44100,
+            this.params.exciteAmount, this.params.exciteMix
         );
 
         output[0].set(this.wasmOutputL);
