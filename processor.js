@@ -7,85 +7,54 @@ class DeltaSigmaProcessor extends AudioWorkletProcessor {
         super();
         this.oversampleFactor = 128;
         this.taps = 128;
-        // アグレッション0.70を活かしつつプチノイズを防ぐため、0.50から0.47へ微調整
-        this.targetLevel = 0.47;
-        this.expansionDepth = 1.20;
 
-        this.initialized = false;
-        this.states = [{ currentPeak: 0.1 }, { currentPeak: 0.1 }];
-
-        // --- 動的B係数の計算 ---
-        const fs = (typeof sampleRate !== 'undefined' ? sampleRate : 44100) * this.oversampleFactor;
-        const calcB = (f) => Math.pow((2 * Math.PI * f) / fs, 2);
-
-        this.bCoeffs = {
-            b1: calcB(10390),
-            b2: calcB(17000),
-            b3: calcB(24760)
+        // ユーザーが後から変更可能なパラメータ
+        this.params = {
+            targetLevel: 0.70,
+            expansionDepth: 1.15,
+            aggression: 0.70
         };
 
+        this.initialized = false;
         const wasmModule = options.processorOptions.wasmModule;
-        if (wasmModule) {
-            this.initWasm(wasmModule);
-        }
+        if (wasmModule) this.initWasm(wasmModule);
     }
 
-    // (generateSincTable, initWasm は前回同様。引数の変更はないためそのまま使えます)
     async initWasm(module) {
         try {
             const importObject = {
                 env: {
                     seed: () => Date.now() * Math.random(),
                     abort: () => { },
-                    "NativeMath.tanh": (x) => Math.tanh(x),
-                    "Math.tanh": (x) => Math.tanh(x)
                 }
             };
             this.instance = await WebAssembly.instantiate(module, importObject);
             this.exports = this.instance.exports;
             this.memory = this.exports.memory;
 
-            this.inputPtr = 10000;
-            this.outputPtr = 20000;
-            this.sincTablePtr = 40000;
-            this.historyPtr = 1100000;
-            this.statePtr = 1200000;
+            this.inputLPtr = 10000; this.inputRPtr = 20000;
+            this.outputLPtr = 30000; this.outputRPtr = 40000;
+            this.sincTablePtr = 50000;
+            this.historyLPtr = 1100000; this.historyRPtr = 1200000;
+            this.stateLPtr = 1300000; this.stateRPtr = 1400000;
 
-            // --- 重要：Sincテーブルは絶対に必要です ---
-            const rate = typeof sampleRate !== 'undefined' ? sampleRate : 44100;
-            const sincData = this.generateSincTable(rate);
-            new Float32Array(this.memory.buffer, this.sincTablePtr, sincData.length).set(sincData);
+            // Sincテーブル生成をWasm内部で実行
+            this.exports.generateSincTable(this.sincTablePtr, this.oversampleFactor, this.taps, sampleRate || 44100);
 
-            // 固定ビューの作成
-            this.wasmInputView = new Float32Array(this.memory.buffer, this.inputPtr, 128);
-            this.wasmOutputView = new Float32Array(this.memory.buffer, this.outputPtr, 128);
+            this.wasmInputL = new Float32Array(this.memory.buffer, this.inputLPtr, 128);
+            this.wasmInputR = new Float32Array(this.memory.buffer, this.inputRPtr, 128);
+            this.wasmOutputL = new Float32Array(this.memory.buffer, this.outputLPtr, 128);
+            this.wasmOutputR = new Float32Array(this.memory.buffer, this.outputRPtr, 128);
 
-            // --- 状態のリセット（追加分も含めて28要素） ---
-            // 1chあたり14要素 (56byte) × 2チャンネル分 = 28要素
-            new Float32Array(this.memory.buffer, this.statePtr, 28).fill(0);
-
-            // 履歴バッファのリセット
-            new Float32Array(this.memory.buffer, this.historyPtr, 256).fill(0);
+            // ③ stateの初期化サイズを修正（14要素 = i1〜i7, fb, curPeak, h0〜h3, lastGain）
+            new Float32Array(this.memory.buffer, this.stateLPtr, 14).fill(0);
+            new Float32Array(this.memory.buffer, this.stateRPtr, 14).fill(0);
+            // historyの初期化（taps要素、×4はbyte数なので不要）
+            new Float32Array(this.memory.buffer, this.historyLPtr, this.taps).fill(0);
+            new Float32Array(this.memory.buffer, this.historyRPtr, this.taps).fill(0);
 
             this.initialized = true;
-            console.log("Lilin: Multi-stage Engine Online (Optimized)");
-        } catch (e) { console.error("WASM Init Error:", e); }
-    }
-
-    generateSincTable(rate) {
-        const size = this.oversampleFactor * this.taps;
-        const table = new Float32Array(size);
-        const center = (this.taps / 2) * this.oversampleFactor;
-        for (let i = 0; i < size; i++) {
-            const x = (i - center) / this.oversampleFactor;
-            if (x === 0) table[i] = 1.0;
-            else {
-                const pix = Math.PI * x;
-                const window = 0.42 - 0.5 * Math.cos((2 * Math.PI * i) / (size - 1)) + 0.08 * Math.cos((4 * Math.PI * i) / (size - 1));
-                table[i] = (Math.sin(pix) / pix) * window;
-            }
-        }
-        return table;
+        } catch (e) { console.error("Lilin Init Error:", e); }
     }
 
     process(inputs, outputs, parameters) {
@@ -99,45 +68,19 @@ class DeltaSigmaProcessor extends AudioWorkletProcessor {
         }
 
         const bufferLen = input[0].length;
-        let globalPeak = 0;
-        for (let c = 0; c < input.length; c++) {
-            for (let i = 0; i < bufferLen; i++) {
-                const a = Math.abs(input[c][i]);
-                if (a > globalPeak) globalPeak = a;
-            }
-        }
+        this.wasmInputL.set(input[0]);
+        this.wasmInputR.set(input[1] || input[0]);
 
-        for (let channel = 0; channel < input.length; channel++) {
-            const inputChannel = input[channel];
-            const state = this.states[channel];
+        this.exports.process_simd(
+            this.inputLPtr, this.inputRPtr, this.outputLPtr, this.outputRPtr,
+            this.sincTablePtr, this.historyLPtr, this.historyRPtr,
+            this.stateLPtr, this.stateRPtr,
+            bufferLen, this.oversampleFactor, this.taps,
+            this.params.targetLevel, this.params.expansionDepth, this.params.aggression, sampleRate || 44100
+        );
 
-            let chPeak = 0;
-            for (let i = 0; i < bufferLen; i++) {
-                const a = Math.abs(inputChannel[i]);
-                if (a > chPeak) chPeak = a;
-            }
-
-            if (chPeak > state.currentPeak) state.currentPeak = chPeak * 1.1;
-            else state.currentPeak += (chPeak - state.currentPeak) * 0.0001;
-
-            const baseGain = this.targetLevel / Math.max(0.01, state.currentPeak);
-            const expansionFactor = Math.pow(Math.max(0.01, globalPeak), this.expansionDepth - 1.0);
-            const targetGain = baseGain * expansionFactor;
-
-            this.wasmInputView.set(inputChannel);
-
-            // process_simd に計算済みの B1, B2, B3 を渡す
-            this.exports.process_simd(
-                this.inputPtr, this.outputPtr, this.sincTablePtr,
-                this.historyPtr + (channel * this.taps * 4),
-                this.statePtr + (channel * 14 * 4),
-                bufferLen, this.oversampleFactor, this.taps,
-                targetGain,
-                this.bCoeffs.b1, this.bCoeffs.b2, this.bCoeffs.b3
-            );
-
-            output[channel].set(this.wasmOutputView);
-        }
+        output[0].set(this.wasmOutputL);
+        output[1].set(this.wasmOutputR);
         return true;
     }
 }
