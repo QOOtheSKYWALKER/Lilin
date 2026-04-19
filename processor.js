@@ -5,7 +5,6 @@ class DeltaSigmaProcessor extends AudioWorkletProcessor {
 
     constructor(options) {
         super();
-        this.oversampleFactor = 128;
         this.taps = 128;
 
         this.silenceThreshold = 0.0001;  // この値以下を無音とみなす
@@ -29,15 +28,17 @@ class DeltaSigmaProcessor extends AudioWorkletProcessor {
 
     async initWasm(module) {
         try {
-            const importObject = {
-                env: {
-                    seed: () => Date.now() * Math.random(),
-                    abort: () => { },
-                }
-            };
+            const importObject = { env: { seed: () => Date.now() * Math.random(), abort: () => { } } };
             this.instance = await WebAssembly.instantiate(module, importObject);
             this.exports = this.instance.exports;
             this.memory = this.exports.memory;
+
+            // oversampleFactorをここで確定（sampleRateが確実に利用可能）
+            const sr = sampleRate || 44100;
+            const baseRate = (sr % 44100 === 0) ? 44100 : 48000;
+            const targetRate = baseRate * 128;
+            this.oversampleFactor = Math.ceil(Math.round(targetRate / sr) / 4) * 4;
+            console.log(`Lilin: sampleRate=${sr}, oversample=${this.oversampleFactor}`);
 
             this.inputLPtr = 10000; this.inputRPtr = 20000;
             this.outputLPtr = 30000; this.outputRPtr = 40000;
@@ -45,25 +46,24 @@ class DeltaSigmaProcessor extends AudioWorkletProcessor {
             this.historyLPtr = 1100000; this.historyRPtr = 1200000;
             this.stateLPtr = 1300000; this.stateRPtr = 1400000;
 
-            // Sincテーブル生成をWasm内部で実行
-            this.exports.generateSincTable(this.sincTablePtr, this.oversampleFactor, this.taps, sampleRate || 44100);
+            // oversampleFactor確定後にテーブル生成
+            this.exports.generatePolyphaseTable(
+                this.sincTablePtr, this.oversampleFactor, this.taps
+            );
 
             this.wasmInputL = new Float32Array(this.memory.buffer, this.inputLPtr, 128);
             this.wasmInputR = new Float32Array(this.memory.buffer, this.inputRPtr, 128);
             this.wasmOutputL = new Float32Array(this.memory.buffer, this.outputLPtr, 128);
             this.wasmOutputR = new Float32Array(this.memory.buffer, this.outputRPtr, 128);
 
-            // ③ stateの初期化サイズを修正（14要素 = i1〜i7, fb, curPeak, h0〜h3, lastGain）
-            new Float32Array(this.memory.buffer, this.stateLPtr, 15).fill(0);
-            new Float32Array(this.memory.buffer, this.stateRPtr, 15).fill(0);
-            // historyの初期化（taps要素、×4はbyte数なので不要）
+            new Float32Array(this.memory.buffer, this.stateLPtr, 13).fill(0);
+            new Float32Array(this.memory.buffer, this.stateRPtr, 13).fill(0);
             new Float32Array(this.memory.buffer, this.historyLPtr, this.taps).fill(0);
             new Float32Array(this.memory.buffer, this.historyRPtr, this.taps).fill(0);
 
             this.initialized = true;
         } catch (e) { console.error("Lilin Init Error:", e); }
     }
-
     process(inputs, outputs, parameters) {
 
         const input = inputs[0];
@@ -105,8 +105,8 @@ class DeltaSigmaProcessor extends AudioWorkletProcessor {
                 console.log("Lilin: Waking up");
                 // 積分器状態をリセット（無音中に蓄積したDCを除去）
                 if (this.memory) {
-                    new Float32Array(this.memory.buffer, this.stateLPtr, 16).fill(0);
-                    new Float32Array(this.memory.buffer, this.stateRPtr, 16).fill(0);
+                    new Float32Array(this.memory.buffer, this.stateLPtr, 13).fill(0);
+                    new Float32Array(this.memory.buffer, this.stateRPtr, 13).fill(0);
                 }
             } else {
                 this.silenceFrames = 0;
