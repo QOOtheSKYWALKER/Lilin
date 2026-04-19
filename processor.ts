@@ -166,7 +166,6 @@ export function process_simd(
 
                     // 以降の delta = x_excited - fb に変更
                     let delta: f32 = x_excited - fb;
-                    //                    let delta = x - fb;
                     i1 += delta * curG1;
                     i2 += (i1 - i3 * b1) * curG2;
                     i3 += i2 * curG3;
@@ -175,7 +174,7 @@ export function process_simd(
                     i6 += (i5 - i7 * b3) * curG6;
                     i7 += i6 * curG7;
 
-                    const leak: f32 = f32(0.99985);
+                    const leak: f32 = f32(1);
                     i1 *= leak; i2 *= leak; i3 *= leak; i4 *= leak; i5 *= leak; i6 *= leak; i7 *= leak;
                     fb = hardClip(i1 * W1 + i2 * W2 + i3 * W3 + i4 * W4 + i5 * W5 + i6 * W6 + i7 * W7);
 

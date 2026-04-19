@@ -8,6 +8,11 @@ class DeltaSigmaProcessor extends AudioWorkletProcessor {
         this.oversampleFactor = 128;
         this.taps = 128;
 
+        this.silenceThreshold = 0.0001;  // この値以下を無音とみなす
+        this.silenceFrames = 0;
+        this.silenceLimit = Math.ceil(sampleRate / 128 * 3); // 3秒分のブロック数
+        this.sleeping = false;
+
         // ユーザーが後から変更可能なパラメータ
         this.params = {
             targetLevel: 0.70,
@@ -60,6 +65,7 @@ class DeltaSigmaProcessor extends AudioWorkletProcessor {
     }
 
     process(inputs, outputs, parameters) {
+
         const input = inputs[0];
         const output = outputs[0];
         if (!this.initialized || !input || !input[0] || parameters.bypass[0] > 0.5) {
@@ -70,6 +76,43 @@ class DeltaSigmaProcessor extends AudioWorkletProcessor {
         }
 
         const bufferLen = input[0].length;
+
+        // 無音検知
+        let inputPeak = 0;
+        for (let c = 0; c < input.length; c++) {
+            for (let i = 0; i < bufferLen; i++) {
+                const a = Math.abs(input[c][i]);
+                if (a > inputPeak) inputPeak = a;
+            }
+        }
+
+        if (inputPeak < this.silenceThreshold) {
+            this.silenceFrames++;
+            if (this.silenceFrames >= this.silenceLimit) {
+                // スリープ状態：入力をそのままスルーして計算をスキップ
+                if (!this.sleeping) {
+                    this.sleeping = true;
+                    console.log("Lilin: Sleeping (silence detected)");
+                }
+                for (let c = 0; c < input.length; c++) output[c].set(input[c]);
+                return true;
+            }
+        } else {
+            // 音声再開時の処理
+            if (this.sleeping) {
+                this.sleeping = false;
+                this.silenceFrames = 0;
+                console.log("Lilin: Waking up");
+                // 積分器状態をリセット（無音中に蓄積したDCを除去）
+                if (this.memory) {
+                    new Float32Array(this.memory.buffer, this.stateLPtr, 16).fill(0);
+                    new Float32Array(this.memory.buffer, this.stateRPtr, 16).fill(0);
+                }
+            } else {
+                this.silenceFrames = 0;
+            }
+        }
+
         this.wasmInputL.set(input[0]);
         this.wasmInputR.set(input[1] || input[0]);
 
