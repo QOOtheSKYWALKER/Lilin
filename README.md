@@ -20,14 +20,14 @@ Lilin は、Web Audio API と WebAssembly (AssemblyScript) を駆使して構築
 
 ## 内部構造
 ### コア・エンジン
-- `assembly/processor.ts`: DSPエンジンの心臓部（AssemblyScript / SIMD最適化）。
+- `processor.wasm/.ts`: DSPエンジンの心臓部（AssemblyScript / SIMD最適化）。
 - `processor.js`: AudioWorkletProcessor と Wasm メモリのブリッジ。
 
 ### Chrome 拡張機能
 ブラウザのタブ音声をキャプチャし、リアルタイムで Lilin エンジンを適用します。
 - `manifest.json`: 拡張機能の設定ファイル。
 - `background.js`: タブキャプチャの制御。
-- `offscreen.js`: Lilin エンジンを駆動するオフスクリーン・ドキュメント。
+- `offscreen.html/js`: Lilin エンジンを駆動するオフスクリーン・ドキュメント。
 - `popup.html/js`: 拡張機能の設定画面。
 
 ### プレイヤー (Standalone)
@@ -39,10 +39,3 @@ Lilin は、Web Audio API と WebAssembly (AssemblyScript) を駆使して構築
 3. 「パッケージ化されていない拡張機能を読み込む」をクリックし、本プロジェクトのルートディレクトリを選択。
 4. 拡張機能アイコンをクリックし、対象のタブで「START」を押すと高音質化が有効になります。
 
-## 開発環境
-- AssemblyScript によるビルド: `npm run asbuild`
-- ローカルプレビュー: `npm run dev`
-
-## 哲学
-"Simple, Minimal, and Pure."
-一つのプロセス、一つの実装による無駄のないインターフェースと、妥協のない内部処理を目指しています。
