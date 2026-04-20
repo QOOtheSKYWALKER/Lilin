@@ -23,6 +23,34 @@ function hardClip(x: f32): f32 {
     if (x < f32(-1.0)) return f32(-1.0);
     return x;
 }
+
+// 新レイアウト: transTable[k * oversample + j]
+// → kループ内で j方向に連続アクセス可能
+export function generatePolyphaseTable(
+    tablePtr: usize, oversample: i32, taps: i32
+): void {
+    const size = oversample * taps;
+    const center = (taps / 2) * oversample;
+    for (let phase = 0; phase < oversample; phase++) {
+        for (let tap = 0; tap < taps; tap++) {
+            const i = tap * oversample + phase; // 旧レイアウトでの位置
+            const x = f32(i - center) / f32(oversample);
+            let val: f32;
+            if (x == f32(0)) {
+                val = f32(1.0);
+            } else {
+                const pix = f32(Math.PI) * x;
+                const window = f32(0.42)
+                    - f32(0.5) * f32(Math.cos(f64(f32(2.0) * f32(Math.PI) * f32(i) / f32(size - 1))))
+                    + f32(0.08) * f32(Math.cos(f64(f32(4.0) * f32(Math.PI) * f32(i) / f32(size - 1))));
+                val = (f32(Math.sin(f64(pix))) / pix) * window;
+            }
+            // 新レイアウト: transTable[tap * oversample + phase]
+            store<f32>(tablePtr + (tap * oversample + phase) * 4, val);
+        }
+    }
+}
+
 @inline
 function processChannel(
     inP: usize, outP: usize, histP: usize, sP: usize,
@@ -176,33 +204,6 @@ function processChannel(
     store<f32>(sP + 40, hpState);
     store<f32>(sP + 44, curRMS);
     store<i32>(sP + 48, writePos); // i32として保存
-}
-
-// 新レイアウト: transTable[k * oversample + j]
-// → kループ内で j方向に連続アクセス可能
-export function generatePolyphaseTable(
-    tablePtr: usize, oversample: i32, taps: i32
-): void {
-    const size = oversample * taps;
-    const center = (taps / 2) * oversample;
-    for (let phase = 0; phase < oversample; phase++) {
-        for (let tap = 0; tap < taps; tap++) {
-            const i = tap * oversample + phase; // 旧レイアウトでの位置
-            const x = f32(i - center) / f32(oversample);
-            let val: f32;
-            if (x == f32(0)) {
-                val = f32(1.0);
-            } else {
-                const pix = f32(Math.PI) * x;
-                const window = f32(0.42)
-                    - f32(0.5) * f32(Math.cos(f64(f32(2.0) * f32(Math.PI) * f32(i) / f32(size - 1))))
-                    + f32(0.08) * f32(Math.cos(f64(f32(4.0) * f32(Math.PI) * f32(i) / f32(size - 1))));
-                val = (f32(Math.sin(f64(pix))) / pix) * window;
-            }
-            // 新レイアウト: transTable[tap * oversample + phase]
-            store<f32>(tablePtr + (tap * oversample + phase) * 4, val);
-        }
-    }
 }
 
 export function process_simd(
