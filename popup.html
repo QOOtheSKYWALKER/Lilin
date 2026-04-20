@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Lilin DSP</title>
+    <style>
+        :root {
+            --bg: #0a0a0f;
+            --surface: rgba(255, 255, 255, 0.05);
+            --accent: #8b5cf6;
+            --accent-glow: rgba(139, 92, 246, 0.4);
+            --text: #f8fafc;
+            --text-dim: #94a3b8;
+        }
+
+        body {
+            width: 320px;
+            margin: 0;
+            padding: 24px;
+            background: var(--bg);
+            color: var(--text);
+            font-family: 'Inter', -apple-system, system-ui, sans-serif;
+            overflow: hidden;
+        }
+
+        .container {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .header h1 {
+            font-size: 20px;
+            font-weight: 700;
+            margin: 0;
+            background: linear-gradient(135deg, #fff 0%, var(--accent) 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            letter-spacing: -0.02em;
+        }
+
+        .card {
+            background: var(--surface);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 16px;
+            padding: 16px;
+            transition: all 0.3s ease;
+        }
+
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            border-radius: 20px;
+            background: rgba(139, 92, 246, 0.1);
+            color: var(--accent);
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .control-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .label-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        label {
+            font-size: 13px;
+            color: var(--text-dim);
+        }
+
+        .btn-activate {
+            width: 100%;
+            padding: 14px;
+            border-radius: 12px;
+            border: none;
+            background: var(--accent);
+            color: #fff;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            box-shadow: 0 4px 20px var(--accent-glow);
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .btn-activate:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 24px var(--accent-glow);
+        }
+
+        .btn-activate:active {
+            transform: translateY(0);
+        }
+
+        .visualizer {
+            height: 40px;
+            display: flex;
+            align-items: flex-end;
+            gap: 3px;
+            padding: 4px 0;
+        }
+
+        .bar {
+            flex: 1;
+            background: var(--accent);
+            border-radius: 2px;
+            height: 4px;
+            transition: height 0.1s ease;
+            opacity: 0.5;
+        }
+
+        .footer {
+            font-size: 11px;
+            color: var(--text-dim);
+            text-align: center;
+            margin-top: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div style="width: 32px; height: 32px; background: var(--accent); border-radius: 8px; display: flex; align-items: center; justify-content: center;">
+                <span style="font-weight: 800; font-size: 18px;">L</span>
+            </div>
+            <h1>Lilin Audio</h1>
+        </div>
+
+        <div class="card">
+            <div class="status-badge" id="status">Ready to Process</div>
+            <div class="visualizer" id="visualizer">
+                <!-- Bars dynamic -->
+            </div>
+        </div>
+
+        <div class="control-group">
+            <button class="btn-activate" id="btnActivate">Activate DSP</button>
+        </div>
+
+        <div class="footer">
+            5th-order ΔΣ · 128x Oversampling · SIMD
+        </div>
+    </div>
+    <script src="popup.js"></script>
+</body>
+</html>

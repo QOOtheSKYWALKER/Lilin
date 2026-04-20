@@ -17,8 +17,8 @@ class DeltaSigmaProcessor extends AudioWorkletProcessor {
             targetLevel: 0.70,
             expansionDepth: 1.15,
             aggression: 0.70,
-            exciteAmount: 0.30,  // 歪みの深さ（0=オフ、0.15〜0.30が実用域）
-            exciteMix: 0.15,     // 混合量（0.05〜0.15）
+            exciteAmount: 0.15,  // 歪みの深さ（0=オフ、0.15〜0.30が実用域）
+            exciteMix: 0.10,     // 混合量（0.05〜0.15）
         };
 
         this.initialized = false;

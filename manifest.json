@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "Lilin - High Precision Delta-Sigma DSP",
+  "version": "1.0.0",
+  "description": "Browser-wide 5th-order Delta-Sigma Audio Processor",
+  "permissions": [
+    "tabCapture",
+    "offscreen",
+    "storage",
+    "activeTab"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "128": "public/icon.png"
+    }
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["processor.wasm", "processor.js"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

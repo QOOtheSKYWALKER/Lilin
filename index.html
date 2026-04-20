@@ -1,86 +1,215 @@
 <!DOCTYPE html>
 <html lang="ja">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Lilin Player (Simple)</title>
     <style>
         body {
-            background: #0f0f0f; color: #ddd; font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-            margin: 0; display: flex; flex-direction: column; height: 100vh; overflow: hidden;
+            background: #0f0f0f;
+            color: #ddd;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            overflow: hidden;
         }
+
         header {
-            text-align: center; padding: 20px; background: #1a1a1a;
-            border-bottom: 1px solid #333; flex-shrink: 0;
+            text-align: center;
+            padding: 20px;
+            background: #1a1a1a;
+            border-bottom: 1px solid #333;
+            flex-shrink: 0;
         }
-        #track-name { font-size: 1.1rem; font-weight: bold; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; height: 1.4em; }
+
+        #track-name {
+            font-size: 1.1rem;
+            font-weight: bold;
+            color: #fff;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            height: 1.4em;
+        }
 
         main {
-            flex: 1; display: flex; flex-direction: column; align-items: center;
-            padding: 20px; overflow: hidden;
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+            overflow: hidden;
         }
-        #audio-player { width: 100%; max-width: 600px; margin-bottom: 20px; filter: invert(1) hue-rotate(180deg) brightness(1.5); flex-shrink: 0; }
-        
+
+        #audio-player {
+            width: 100%;
+            max-width: 600px;
+            margin-bottom: 20px;
+            filter: invert(1) hue-rotate(180deg) brightness(1.5);
+            flex-shrink: 0;
+        }
+
         #playlist-container {
-            width: 100%; max-width: 600px; flex: 1; overflow-y: auto;
-            border-top: 1px solid #333; border-bottom: 1px solid #333;
+            width: 100%;
+            max-width: 600px;
+            flex: 1;
+            overflow-y: auto;
+            border-top: 1px solid #333;
+            border-bottom: 1px solid #333;
         }
-        #playlist { list-style: none; padding: 0; margin: 0; }
-        
+
+        #playlist {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+
         .track-item {
-            padding: 12px 15px; border-bottom: 1px solid #222; cursor: pointer;
-            display: flex; justify-content: space-between; align-items: center;
-            font-size: 0.9rem; transition: 0.2s;
+            padding: 12px 15px;
+            border-bottom: 1px solid #222;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 0.9rem;
+            transition: 0.2s;
         }
-        .track-item:hover { background: #222; }
-        .track-item.active { color: #a855f7; background: #1a1a1a; font-weight: bold; border-left: 4px solid #a855f7; }
+
+        .track-item:hover {
+            background: #222;
+        }
+
+        .track-item.active {
+            color: #a855f7;
+            background: #1a1a1a;
+            font-weight: bold;
+            border-left: 4px solid #a855f7;
+        }
 
         .delete-btn {
-            opacity: 0; background: rgba(255, 68, 68, 0.1); color: #ff4444; border: 1px solid #ff4444;
-            padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; transition: 0.2s;
+            opacity: 0;
+            background: rgba(255, 68, 68, 0.1);
+            color: #ff4444;
+            border: 1px solid #ff4444;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            transition: 0.2s;
             cursor: pointer;
         }
-        .track-item:hover .delete-btn { opacity: 1; }
-        .delete-btn:hover { background: #ff4444; color: #fff; }
+
+        .track-item:hover .delete-btn {
+            opacity: 1;
+        }
+
+        .delete-btn:hover {
+            background: #ff4444;
+            color: #fff;
+        }
 
         footer {
-            display: flex; justify-content: space-between; align-items: center;
-            padding: 15px 25px; background: #1a1a1a; border-top: 1px solid #333;
-            font-family: 'JetBrains Mono', 'Courier New', monospace; font-size: 0.8rem; flex-shrink: 0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px 25px;
+            background: #1a1a1a;
+            border-top: 1px solid #333;
+            font-family: 'JetBrains Mono', 'Courier New', monospace;
+            font-size: 0.8rem;
+            flex-shrink: 0;
         }
-        .status-area { color: #888; display: flex; align-items: center; }
-        .status-online { color: #4ade80; font-weight: bold; }
-        .controls { display: flex; gap: 10px; }
-        
+
+        .status-area {
+            color: #888;
+            display: flex;
+            align-items: center;
+        }
+
+        .status-online {
+            color: #4ade80;
+            font-weight: bold;
+        }
+
+        .controls {
+            display: flex;
+            gap: 10px;
+        }
+
         .btn {
-            background: #333; color: #eee; border: 1px solid #444;
-            padding: 8px 15px; cursor: pointer; border-radius: 4px; transition: 0.2s;
+            background: #333;
+            color: #eee;
+            border: 1px solid #444;
+            padding: 8px 15px;
+            cursor: pointer;
+            border-radius: 4px;
+            transition: 0.2s;
         }
-        .btn:hover { background: #444; border-color: #666; }
+
+        .btn:hover {
+            background: #444;
+            border-color: #666;
+        }
 
         /* Toggle Switch */
         .switch {
-            position: relative; display: inline-block;
-            width: 34px; height: 20px; margin-right: 10px;
+            position: relative;
+            display: inline-block;
+            width: 34px;
+            height: 20px;
+            margin-right: 10px;
         }
-        .switch input { opacity: 0; width: 0; height: 0; }
+
+        .switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
         .slider {
-            position: absolute; cursor: pointer;
-            top: 0; left: 0; right: 0; bottom: 0;
-            background-color: #333; transition: .4s; border-radius: 20px;
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #333;
+            transition: .4s;
+            border-radius: 20px;
             border: 1px solid #444;
         }
+
         .slider:before {
-            position: absolute; content: "";
-            height: 14px; width: 14px; left: 2px; bottom: 2px;
-            background-color: #888; transition: .4s; border-radius: 50%;
+            position: absolute;
+            content: "";
+            height: 14px;
+            width: 14px;
+            left: 2px;
+            bottom: 2px;
+            background-color: #888;
+            transition: .4s;
+            border-radius: 50%;
         }
-        input:checked + .slider { background-color: #a855f7; border-color: #c084fc; }
-        input:checked + .slider:before { transform: translateX(14px); background-color: white; }
-        
-        #file-input, #folder-input { display: none; }
+
+        input:checked+.slider {
+            background-color: #a855f7;
+            border-color: #c084fc;
+        }
+
+        input:checked+.slider:before {
+            transform: translateX(14px);
+            background-color: white;
+        }
+
+        #file-input,
+        #folder-input {
+            display: none;
+        }
     </style>
 </head>
+
 <body>
 
     <header>
@@ -141,7 +270,7 @@
 
                 const wasmRes = await fetch('processor.wasm');
                 if (!wasmRes.ok) throw new Error("Failed to load WASM");
-                
+
                 const wasmBuffer = await wasmRes.arrayBuffer();
                 const wasmModule = await WebAssembly.compile(wasmBuffer);
 
@@ -213,12 +342,12 @@
 
             currentIndex = index;
             const track = queue[index];
-            
+
             if (currentObjectURL) URL.revokeObjectURL(currentObjectURL);
             currentObjectURL = URL.createObjectURL(track.file);
             audioEl.src = currentObjectURL;
             trackNameEl.textContent = track.name;
-            
+
             renderPlaylist();
             audioEl.play().catch(e => console.log("Playback failed:", e));
         }
@@ -263,4 +392,5 @@
         };
     </script>
 </body>
+
 </html>
