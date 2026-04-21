@@ -16,9 +16,9 @@ class DeltaSigmaProcessor extends AudioWorkletProcessor {
         this.params = {
             targetLevel: 0.70,
             expansionDepth: 1.15,
-            aggression: 0.70,
-            exciteAmount: 0.15,  // 歪みの深さ（0=オフ、0.15〜0.30が実用域）
-            exciteMix: 0.10,     // 混合量（0.05〜0.15）
+            aggression: 0.75,
+            exciteAmount: 2.0,  // (0.5〜2.0)上げると歪みが深くなり、より多くの倍音が生成されます。
+            exciteMix: 0.15,     // (0.05〜0.15)上げると、「シャリッ」とした感触が強まります。
         };
 
         this.initialized = false;
@@ -33,33 +33,18 @@ class DeltaSigmaProcessor extends AudioWorkletProcessor {
             this.exports = this.instance.exports;
             this.memory = this.exports.memory;
 
-            // oversampleFactorをここで確定（sampleRateが確実に利用可能）
-            const sr = sampleRate || 44100;
-            const baseRate = (sr % 44100 === 0) ? 44100 : 48000;
-            const targetRate = baseRate * 128;
-            this.oversampleFactor = Math.ceil(Math.round(targetRate / sr) / 4) * 4;
-            console.log(`Lilin: sampleRate=${sr}, oversample=${this.oversampleFactor}`);
-
+            // ポインタ定義はJS側でも入出力バッファのために必要
             this.inputLPtr = 10000; this.inputRPtr = 20000;
             this.outputLPtr = 30000; this.outputRPtr = 40000;
-            this.sincTablePtr = 50000;
-            this.historyLPtr = 1100000; this.historyRPtr = 1200000;
-            this.stateLPtr = 1300000; this.stateRPtr = 1400000;
+            // sincTablePtr, historyPtr, statePtrの定義は不要になる
 
-            // oversampleFactor確定後にテーブル生成
-            this.exports.generatePolyphaseTable(
-                this.sincTablePtr, this.oversampleFactor, this.taps
-            );
+            // init一発でテーブル生成・状態初期化・oversample計算がすべて完了
+            this.exports.init(sampleRate || 44100);
 
             this.wasmInputL = new Float32Array(this.memory.buffer, this.inputLPtr, 128);
             this.wasmInputR = new Float32Array(this.memory.buffer, this.inputRPtr, 128);
             this.wasmOutputL = new Float32Array(this.memory.buffer, this.outputLPtr, 128);
             this.wasmOutputR = new Float32Array(this.memory.buffer, this.outputRPtr, 128);
-
-            new Float32Array(this.memory.buffer, this.stateLPtr, 13).fill(0);
-            new Float32Array(this.memory.buffer, this.stateRPtr, 13).fill(0);
-            new Float32Array(this.memory.buffer, this.historyLPtr, this.taps).fill(0);
-            new Float32Array(this.memory.buffer, this.historyRPtr, this.taps).fill(0);
 
             this.initialized = true;
         } catch (e) { console.error("Lilin Init Error:", e); }
@@ -104,10 +89,7 @@ class DeltaSigmaProcessor extends AudioWorkletProcessor {
                 this.silenceFrames = 0;
                 console.log("Lilin: Waking up");
                 // 積分器状態をリセット（無音中に蓄積したDCを除去）
-                if (this.memory) {
-                    new Float32Array(this.memory.buffer, this.stateLPtr, 13).fill(0);
-                    new Float32Array(this.memory.buffer, this.stateRPtr, 13).fill(0);
-                }
+                this.exports.resetState();
             } else {
                 this.silenceFrames = 0;
             }
@@ -117,12 +99,12 @@ class DeltaSigmaProcessor extends AudioWorkletProcessor {
         this.wasmInputR.set(input[1] || input[0]);
 
         this.exports.process_simd(
-            this.inputLPtr, this.inputRPtr, this.outputLPtr, this.outputRPtr,
-            this.sincTablePtr, this.historyLPtr, this.historyRPtr,
-            this.stateLPtr, this.stateRPtr,
-            bufferLen, this.oversampleFactor, this.taps,
-            this.params.targetLevel, this.params.expansionDepth, this.params.aggression, sampleRate || 44100,
-            this.params.exciteAmount, this.params.exciteMix
+            bufferLen,
+            this.params.targetLevel,
+            this.params.expansionDepth,
+            this.params.aggression,
+            this.params.exciteAmount,
+            this.params.exciteMix
         );
 
         output[0].set(this.wasmOutputL);
