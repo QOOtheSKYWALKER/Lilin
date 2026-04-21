@@ -39,7 +39,7 @@ class DeltaSigmaProcessor extends AudioWorkletProcessor {
             // sincTablePtr, historyPtr, statePtrの定義は不要になる
 
             // init一発でテーブル生成・状態初期化・oversample計算がすべて完了
-            this.exports.init(sampleRate || 44100);
+            this.exports.init(sampleRate || 44100, this.params.aggression, this.params.targetLevel, this.params.expansionDepth, this.params.exciteAmount, this.params.exciteMix);
 
             this.wasmInputL = new Float32Array(this.memory.buffer, this.inputLPtr, 128);
             this.wasmInputR = new Float32Array(this.memory.buffer, this.inputRPtr, 128);
@@ -98,14 +98,7 @@ class DeltaSigmaProcessor extends AudioWorkletProcessor {
         this.wasmInputL.set(input[0]);
         this.wasmInputR.set(input[1] || input[0]);
 
-        this.exports.process_simd(
-            bufferLen,
-            this.params.targetLevel,
-            this.params.expansionDepth,
-            this.params.aggression,
-            this.params.exciteAmount,
-            this.params.exciteMix
-        );
+        this.exports.process_simd(bufferLen);
 
         output[0].set(this.wasmOutputL);
         output[1].set(this.wasmOutputR);
