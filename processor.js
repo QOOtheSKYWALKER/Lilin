@@ -17,8 +17,7 @@ class DeltaSigmaProcessor extends AudioWorkletProcessor {
             targetLevel: 0.70,
             expansionDepth: 1.15,
             aggression: 0.75,
-            exciteAmount: 2.0,  // (0.5〜2.0)上げると歪みが深くなり、より多くの倍音が生成されます。
-            exciteMix: 0.15,     // (0.05〜0.15)上げると、「シャリッ」とした感触が強まります。
+            exciteAmount: 0.15,
         };
 
         this.initialized = false;
@@ -39,7 +38,7 @@ class DeltaSigmaProcessor extends AudioWorkletProcessor {
             // sincTablePtr, historyPtr, statePtrの定義は不要になる
 
             // init一発でテーブル生成・状態初期化・oversample計算がすべて完了
-            this.exports.init(sampleRate || 44100, this.params.aggression, this.params.targetLevel, this.params.expansionDepth, this.params.exciteAmount, this.params.exciteMix);
+            this.exports.init(sampleRate || 44100, this.params.aggression, this.params.targetLevel, this.params.expansionDepth, this.params.exciteAmount);
 
             this.wasmInputL = new Float32Array(this.memory.buffer, this.inputLPtr, 128);
             this.wasmInputR = new Float32Array(this.memory.buffer, this.inputRPtr, 128);
