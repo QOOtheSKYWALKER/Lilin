@@ -31,7 +31,6 @@ let g_hpCoeff: f32 = 0.0;
 let g_targetLevel: f32 = 0.0;
 let g_expansionDepth: f32 = 0.0;
 let g_exciteAmount: f32 = 0.0;
-let g_exciteMix: f32 = 0.0;
 
 // 固定メモリアドレス（processor.jsのPtr定義と一致させる）
 const INPUT_L: usize = 10000;
@@ -55,45 +54,44 @@ function hardClip(x: f32): f32 {
 
 // 新レイアウト: transTable[k * oversample + j]
 // → kループ内で j方向に連続アクセス可能
+//
+// cutoff = 0.5 → カットオフを sampleRate/4 に設定
+// （1.0 = Nyquist = sampleRate/2 に対して半分）
+// sinc引数を cutoff 倍してカットオフを下げ、
+// 係数全体に cutoff を乗じて通過帯域ゲインを 1.0 に維持する。
+// これにより sampleRate/4 以上の折り返し成分を除去できる。
 @inline
 function generatePolyphaseTable(): void {
+    const cutoff: f32 = f32(0.5); // 1.0 = sr/2 (Nyquist), 0.5 = sr/4
     const size = g_oversample * g_taps;
     const center = (g_taps / 2) * g_oversample;
     for (let tap = 0; tap < g_taps; tap++) {
         for (let phase = 0; phase < g_oversample; phase++) {
             const i = tap * g_oversample + phase;
-            const xf = f32(i - center) / f32(g_oversample);
+            // Scale the sinc argument by cutoff to lower the passband edge
+            const xf = f32(i - center) / f32(g_oversample) * cutoff;
             const pix = f32(Math.PI) * xf;
             const window = f32(0.42)
                 - f32(0.5) * f32(Math.cos(f64(f32(2.0) * f32(Math.PI) * f32(i) / f32(size - 1))))
                 + f32(0.08) * f32(Math.cos(f64(f32(4.0) * f32(Math.PI) * f32(i) / f32(size - 1))));
-            // x==0のとき sinc(0)=1 だが、pix=0で sin(0)/0=NaNになるため
-            // sinc(x) = sin(πx)/(πx) を (i==center) で分岐なく処理する
-            // → pixが極小のとき sin(pix)/pix ≈ 1.0 なので、
-            //   結果に window を掛けた値が center では window[center] になる
-            // center点のwindow値を確認: i=center → cos項=0.42-0.5+0.08=0.00... 
-            // 実際には center での window = 0.42-0.5*cos(π)+0.08*cos(2π)
-            //                              = 0.42+0.5+0.08 = 1.0
-            // つまり center点では sinc=1, window=1 → val=1.0 が期待値
-            // pixが非常に小さい場合の安全な計算:
             let val: f32;
             if (xf == f32(0)) {
-                // center点のみ: 分岐はここだけ（生成時のみ、リアルタイム処理外）
-                val = f32(1.0);
+                // Center tap: sinc(0) = 1, multiply by cutoff to normalize passband gain
+                val = cutoff;
             } else {
-                val = (f32(Math.sin(f64(pix))) / pix) * window;
+                // Multiply by cutoff to restore unity passband gain
+                val = cutoff * (f32(Math.sin(f64(pix))) / pix) * window;
             }
             store<f32>(SINC_PTR + (tap * g_oversample + phase) * 4, val);
         }
     }
 }
 
-export function init(sampleRate: f32, aggression: f32, targetLevel: f32, expansionDepth: f32, exciteAmount: f32, exciteMix: f32): void {
+export function init(sampleRate: f32, aggression: f32, targetLevel: f32, expansionDepth: f32, exciteAmount: f32): void {
     g_sampleRate = sampleRate;
     g_targetLevel = targetLevel;
     g_expansionDepth = expansionDepth;
     g_exciteAmount = exciteAmount;
-    g_exciteMix = exciteMix;
 
     // oversampleFactorをWasm内で計算（processor.jsと同じロジック）
     const baseRate: f32 = (g_sampleRate % f32(44100) == f32(0))
@@ -120,7 +118,7 @@ export function init(sampleRate: f32, aggression: f32, targetLevel: f32, expansi
 
     // ハイパスフィルタの係数計算（カットオフ周波数 fc を指定）
     // 1次後退差分による簡易HPF係数// カットオフ周波数 Hz（10kHz）
-    g_hpCoeff = f32(1.0) - f32(2.0) * f32(Math.PI) * f32(10000.0) / (g_sampleRate * f32(g_oversample));
+    g_hpCoeff = f32(1.0) - f32(2.0) * f32(Math.PI) * f32(4000.0) / (g_sampleRate * f32(g_oversample));
 
     // Polyphaseテーブル生成
     generatePolyphaseTable();
@@ -232,26 +230,10 @@ function processChannel(
                         sub == 2 ? f32x4.extract_lane(vAcc, 2) :
                             f32x4.extract_lane(vAcc, 3);
 
-                // --- 改良版：ハーモニック・エキサイターロジック ---
                 // 1. HPFで高域成分を取り出す（現在の実装を継続）
                 let hp: f32 = x - hpState;
                 hpState = hpState * g_hpCoeff + x * (f32(1.0) - g_hpCoeff);
-
-                // 2. 非線形処理による倍音生成（ここが肝）
-                // 偶数次（x^2）と奇数次（x^3）を組み合わせた非対称歪み
-                // hp成分を少しブーストして歪みやすくする
-                let pre: f32 = hp * g_exciteAmount;
-                let abs_hp: f32 = f32(Math.abs(pre));
-
-                // 偶数次倍音成分（輝き）：絶対値をとることで生成
-                // 奇数次倍音成分（厚み）：3次式で生成
-                // これを組み合わせることで「真空管のサチュレーション」に近い特性にします
-                let harmonics: f32 = abs_hp * f32(0.5) + (pre * pre * pre) * f32(0.2);
-
-                // 3. 位相を考慮して合成
-                // 元の信号 x に、生成した倍音 harmonics を直接加算
-                // このとき、hpStateを使って直流(DC)成分をカットしつつ戻すのがプロの技
-                let x_excited: f32 = x + harmonics * g_exciteMix;
+                let x_excited: f32 = x + hp * g_exciteAmount;
 
                 // ΔΣ
                 let delta: f32 = x_excited - fb;
