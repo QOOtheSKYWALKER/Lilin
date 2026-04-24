@@ -52,14 +52,34 @@ function hardClip(x: f32): f32 {
     //    三項演算子版が最も安全かつifより高速（条件移動命令CMOVに最適化される）
 }
 
-// 新レイアウト: transTable[k * oversample + j]
-// → kループ内で j方向に連続アクセス可能
-//
+// Kaiser窓の実装（generatePolyphaseTable内で置き換え）
+// β = 8.0 → 阻止域減衰 ~80dB、遷移帯域は狭い
+// β = 10.0 → 阻止域減衰 ~100dB、さらに急峻
+
+@inline
+function kaiserWindow(i: i32, N: i32, beta: f32): f32 {
+    const n_f = f32(N - 1);
+    const x = (f32(2.0) * f32(i)) / n_f - f32(1.0);
+    const x2 = x * x;
+    const arg = beta * f32(Math.sqrt(f64(f32(1.0) - (x2 > f32(1.0) ? f32(1.0) : x2))));
+    return besselI0(arg) / besselI0(beta);
+}
+
+@inline
+function besselI0(x: f32): f32 {
+    let sum: f32 = f32(1.0);
+    let term: f32 = f32(1.0);
+    const x_2 = x / f32(2.0);
+    const x_2_sq = x_2 * x_2;
+    for (let k = 1; k <= 20; k++) {
+        term *= x_2_sq / f32(k * k);
+        sum += term;
+        if (term < f32(1e-6)) break;
+    }
+    return sum;
+}
+
 // cutoff = 0.5 → カットオフを sampleRate/4 に設定
-// （1.0 = Nyquist = sampleRate/2 に対して半分）
-// sinc引数を cutoff 倍してカットオフを下げ、
-// 係数全体に cutoff を乗じて通過帯域ゲインを 1.0 に維持する。
-// これにより sampleRate/4 以上の折り返し成分を除去できる。
 @inline
 function generatePolyphaseTable(): void {
     const cutoff: f32 = f32(0.5); // 1.0 = sr/2 (Nyquist), 0.5 = sr/4
@@ -68,18 +88,16 @@ function generatePolyphaseTable(): void {
     for (let tap = 0; tap < g_taps; tap++) {
         for (let phase = 0; phase < g_oversample; phase++) {
             const i = tap * g_oversample + phase;
-            // Scale the sinc argument by cutoff to lower the passband edge
             const xf = f32(i - center) / f32(g_oversample) * cutoff;
             const pix = f32(Math.PI) * xf;
-            const window = f32(0.42)
-                - f32(0.5) * f32(Math.cos(f64(f32(2.0) * f32(Math.PI) * f32(i) / f32(size - 1))))
-                + f32(0.08) * f32(Math.cos(f64(f32(4.0) * f32(Math.PI) * f32(i) / f32(size - 1))));
+            const window = kaiserWindow(i, size, f32(8.0));
+
             let val: f32;
             if (xf == f32(0)) {
-                // Center tap: sinc(0) = 1, multiply by cutoff to normalize passband gain
-                val = cutoff;
+                // sinc(0) = 1.0 に cutoff を掛けてゲインを合わせる
+                val = cutoff * window;
             } else {
-                // Multiply by cutoff to restore unity passband gain
+                // sin(pix)/pix に window と cutoff を掛ける
                 val = cutoff * (f32(Math.sin(f64(pix))) / pix) * window;
             }
             store<f32>(SINC_PTR + (tap * g_oversample + phase) * 4, val);
