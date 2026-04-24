@@ -17,7 +17,7 @@ class DeltaSigmaProcessor extends AudioWorkletProcessor {
             targetLevel: 0.70,
             expansionDepth: 1.15,
             aggression: 0.75,
-            exciteAmount: 0.15,
+            exciteAmount: 0.1,
         };
 
         this.initialized = false;

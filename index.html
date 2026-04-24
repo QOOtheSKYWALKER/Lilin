@@ -226,7 +226,7 @@
     <footer>
         <div class="status-area">
             <label class="switch">
-                <input type="checkbox" id="engine-toggle" checked onchange="toggleEngine()">
+                <input type="checkbox" id="engine-toggle" checked>
                 <span class="slider"></span>
             </label>
             Lilin Engine: <span id="engine-status">OFFLINE</span>
@@ -254,6 +254,7 @@
         let currentIndex = -1;
         let currentObjectURL = null;
 
+        document.getElementById('engine-toggle').addEventListener('change', toggleEngine);
         async function initLilin() {
             if (audioCtx) return;
 
@@ -275,20 +276,24 @@
                 const wasmModule = await WebAssembly.compile(wasmBuffer);
 
                 dspNode = new AudioWorkletNode(audioCtx, 'delta-sigma-processor', {
-                    processorOptions: { wasmModule }
+                    processorOptions: { wasmModule },
+                    outputChannelCount: [2]  // ← 追加
                 });
 
                 mediaSource = audioCtx.createMediaElementSource(audioEl);
+                if (audioCtx.state === 'suspended') await audioCtx.resume();
                 updateEngineConnection();
 
                 statusEl.className = "status-online";
                 statusEl.style.color = ""; // Reset
+                statusEl.textContent = `7th-order ΔΣ ONLINE @ ${audioCtx.sampleRate}Hz`;
                 console.log("Lilin Engine initialized.");
             } catch (e) {
                 console.error("Lilin Init Error:", e);
                 statusEl.textContent = "ERROR: Init Failed";
                 statusEl.className = "";
                 statusEl.style.color = "#ff4444";
+                audioCtx = null;  // ← 追加。次回の initLilin 呼び出しを有効にする
                 dspNode = null;
             }
         }
@@ -343,9 +348,10 @@
             currentIndex = index;
             const track = queue[index];
 
+            const newURL = URL.createObjectURL(track.file);
+            audioEl.src = newURL;
             if (currentObjectURL) URL.revokeObjectURL(currentObjectURL);
-            currentObjectURL = URL.createObjectURL(track.file);
-            audioEl.src = currentObjectURL;
+            currentObjectURL = newURL;
             trackNameEl.textContent = track.name;
 
             renderPlaylist();

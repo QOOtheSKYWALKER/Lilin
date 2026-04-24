@@ -25,7 +25,6 @@ let b1: f32 = 0.0; let b2: f32 = 0.0; let b3: f32 = 0.0;
 const g_taps: i32 = 128;
 const g_tapsMask: i32 = 127;
 let g_oversample: i32 = 0;
-let g_weightTotalConst: f32 = 0.0;
 let g_sampleRate: f32 = 0.0;
 let g_hpCoeff: f32 = 0.0;
 let g_targetLevel: f32 = 0.0;
@@ -42,6 +41,10 @@ const HIST_L: usize = 1100000;
 const HIST_R: usize = 1200000;
 const STATE_L: usize = 1300000;
 const STATE_R: usize = 1400000;
+// デシメーション用テーブルをWasmメモリに追加
+const DECI_PTR: usize = 200000; // 新規アドレス（50000 + 128*128*4 = 115712でSINCと被らないか確認）
+const FB_BUF_L: usize = 300000;     //FIR用バッファ
+const FB_BUF_R: usize = 300000 + 128 * 4;  // 128サンプル×4byte = 512byte後ろ
 
 @inline
 function hardClip(x: f32): f32 {
@@ -105,6 +108,35 @@ function generatePolyphaseTable(): void {
     }
 }
 
+@inline
+function generateDecimationTable(): void {
+    // デシメーション用LPF: fc = sampleRate/2（ナイキスト）
+    // タップ数 = oversample（128点）、Kaiser窓 β=8
+    const cutoff: f32 = f32(1.0); // 1.0 = sr/2 (Nyquist), 0.5 = sr/4
+    const N = g_oversample;
+    const center = f32(N - 1) / f32(2.0);
+    let sum: f32 = f32(0.0);
+
+    for (let n = 0; n < N; n++) {
+        const x = f32(n) - center;
+        const pix = f32(Math.PI) * x / f32(g_oversample) * cutoff;  // 正規化カットオフ = 1/oversample
+        let val: f32;
+        if (x == f32(0)) {
+            val = f32(1.0);
+        } else {
+            val = f32(Math.sin(f64(pix))) / pix;
+        }
+        // Kaiser窓 β=8
+        val *= kaiserWindow(n, N, f32(8.0));
+        store<f32>(DECI_PTR + n * 4, val);
+        sum += val;
+    }
+    // 正規化（DC利得=1）
+    for (let n = 0; n < N; n++) {
+        store<f32>(DECI_PTR + n * 4, load<f32>(DECI_PTR + n * 4) / sum);
+    }
+}
+
 export function init(sampleRate: f32, aggression: f32, targetLevel: f32, expansionDepth: f32, exciteAmount: f32): void {
     g_sampleRate = sampleRate;
     g_targetLevel = targetLevel;
@@ -118,12 +150,6 @@ export function init(sampleRate: f32, aggression: f32, targetLevel: f32, expansi
     const raw: i32 = i32(Math.round(f64(targetRate / g_sampleRate)));
     // 4の倍数に切り上げ
     g_oversample = ((raw + 3) >> 2) << 2;
-
-    // weightTotalConstを計算
-    g_weightTotalConst = f32(0.0);
-    for (let jj = 0; jj < g_oversample; jj++) {
-        g_weightTotalConst += f32(jj) * (f32(g_oversample) - f32(jj));
-    }
 
     G1 = aggression;
     G2 = G1 * f32(0.75); G3 = G2 * f32(0.55);
@@ -140,6 +166,8 @@ export function init(sampleRate: f32, aggression: f32, targetLevel: f32, expansi
 
     // Polyphaseテーブル生成
     generatePolyphaseTable();
+    // デシメーション用テーブル生成
+    generateDecimationTable();
     // 状態初期化
     resetState();
 }
@@ -164,7 +192,7 @@ export function resetState(): void {
 @inline
 function processChannel(
     len: i32,
-    inP: usize, outP: usize, histP: usize, sP: usize,
+    inP: usize, outP: usize, histP: usize, sP: usize, fbP: usize
 ): void {
     // 状態ロード
     let i1 = load<f32>(sP + 0); let i2 = load<f32>(sP + 4);
@@ -228,8 +256,6 @@ function processChannel(
 
         let vAcc = f32x4.splat(0.0); // 4位相分のアキュムレータ
 
-        let scalarAcc: f32 = 0.0; // デシメーション用スカラー累積
-
         for (let j = 0; j < g_oversample; j += 4) {
             vAcc = f32x4.splat(0.0);
 
@@ -248,7 +274,7 @@ function processChannel(
                         sub == 2 ? f32x4.extract_lane(vAcc, 2) :
                             f32x4.extract_lane(vAcc, 3);
 
-                // 1. HPFで高域成分を取り出す（現在の実装を継続）
+                // HPFで高域成分を取り出す
                 let hp: f32 = x - hpState;
                 hpState = hpState * g_hpCoeff + x * (f32(1.0) - g_hpCoeff);
                 let x_excited: f32 = x + hp * g_exciteAmount;
@@ -264,15 +290,21 @@ function processChannel(
                 i7 += i6 * G7;
                 fb = hardClip(i1 * W1 + i2 * W2 + i3 * W3 + i4 * W4 + i5 * W5 + i6 * W6 + i7 * W7);
 
-                let jj: f32 = f32(j + sub);
-                scalarAcc += fb * jj * (f32(g_oversample) - jj);
+                // fbを別バッファに蓄積してからFIR
+                let fbBufIdx = j + sub;  // 0〜oversample-1
+                store<f32>(fbP + fbBufIdx * 4, fb);
+
             }
         }
 
         if (isNaN(i1) || f32(Math.abs(i1)) > f32(8.0)) {
             i1 = i2 = i3 = i4 = i5 = i6 = i7 = fb = f32(0.0);
         }
-        store<f32>(outP + i * 4, scalarAcc / g_weightTotalConst / currentGain);
+        let out: f32 = f32(0.0);
+        for (let n = 0; n < g_oversample; n++) {
+            out += load<f32>(fbP + n * 4) * load<f32>(DECI_PTR + n * 4);
+        }
+        store<f32>(outP + i * 4, out / currentGain);
     }
 
     // 状態保存（writePosを追加）
@@ -291,10 +323,10 @@ export function process_simd(len: i32): void {
     // LとRを明示的に個別呼び出し
     processChannel(
         len,
-        INPUT_L, OUTPUT_L, HIST_L, STATE_L
+        INPUT_L, OUTPUT_L, HIST_L, STATE_L, FB_BUF_L
     );
     processChannel(
         len,
-        INPUT_R, OUTPUT_R, HIST_R, STATE_R
+        INPUT_R, OUTPUT_R, HIST_R, STATE_R, FB_BUF_R
     );
 }
