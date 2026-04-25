@@ -14,22 +14,17 @@
 // W2: 0.75  // 上げる → 2〜4kHzのプレゼンス強化
 // W3: 0.25  // 下げる → 低中域を引く
 
-const W1: f32 = f32(0.80); const W2: f32 = f32(0.45); const W3: f32 = f32(0.30);
+const W1: f32 = f32(0.90); const W2: f32 = f32(0.75); const W3: f32 = f32(0.25);
 const W4: f32 = f32(0.18); const W5: f32 = f32(0.12); const W6: f32 = f32(0.07); const W7: f32 = f32(0.05);
 
 // === Wasm内部グローバル（JSから触らない） ===
-let G1: f32 = 0.0; let G2: f32 = 0.0; let G3: f32 = 0.0;
-let G4: f32 = 0.0; let G5: f32 = 0.0; let G6: f32 = 0.0; let G7: f32 = 0.0;
 let b1: f32 = 0.0; let b2: f32 = 0.0; let b3: f32 = 0.0;
 
-const g_taps: i32 = 128;
-const g_tapsMask: i32 = 127;
+let g_taps: i32 = 0;
+let g_tapsMask: i32 = 0;
 let g_oversample: i32 = 0;
 let g_sampleRate: f32 = 0.0;
 let g_hpCoeff: f32 = 0.0;
-let g_targetLevel: f32 = 0.0;
-let g_expansionDepth: f32 = 0.0;
-let g_exciteAmount: f32 = 0.0;
 
 // 固定メモリアドレス（processor.jsのPtr定義と一致させる）
 const INPUT_L: usize = 10000;
@@ -45,15 +40,6 @@ const STATE_R: usize = 1400000;
 const DECI_PTR: usize = 200000; // 新規アドレス（50000 + 128*128*4 = 115712でSINCと被らないか確認）
 const FB_BUF_L: usize = 300000;     //FIR用バッファ
 const FB_BUF_R: usize = 300000 + 128 * 4;  // 128サンプル×4byte = 512byte後ろ
-
-@inline
-function hardClip(x: f32): f32 {
-    // f32.min/maxはWasmのネイティブ命令に直接マップされ分岐なし
-    const c1: f32 = x > f32(1.0) ? f32(1.0) : x;
-    return c1 < f32(-1.0) ? f32(-1.0) : c1;
-    // ※ AssemblyScriptのmin/maxはNaN伝播の仕様が異なるため
-    //    三項演算子版が最も安全かつifより高速（条件移動命令CMOVに最適化される）
-}
 
 // Kaiser窓の実装（generatePolyphaseTable内で置き換え）
 // β = 8.0 → 阻止域減衰 ~80dB、遷移帯域は狭い
@@ -85,7 +71,7 @@ function besselI0(x: f32): f32 {
 // cutoff = 0.5 → カットオフを sampleRate/4 に設定
 @inline
 function generatePolyphaseTable(): void {
-    const cutoff: f32 = f32(0.5); // 1.0 = sr/2 (Nyquist), 0.5 = sr/4
+    const cutoff: f32 = f32(1.0); // 1.0 = sr/2 (Nyquist), 0.5 = sr/4
     const size = g_oversample * g_taps;
     const center = (g_taps / 2) * g_oversample;
     for (let tap = 0; tap < g_taps; tap++) {
@@ -113,11 +99,10 @@ function generateDecimationTable(): void {
     // デシメーション用LPF: fc = sampleRate/2（ナイキスト）
     // タップ数 = oversample（128点）、Kaiser窓 β=8
     const cutoff: f32 = f32(1.0); // 1.0 = sr/2 (Nyquist), 0.5 = sr/4
-    const N = g_oversample;
-    const center = f32(N - 1) / f32(2.0);
+    const center = f32(g_oversample - 1) / f32(2.0);
     let sum: f32 = f32(0.0);
 
-    for (let n = 0; n < N; n++) {
+    for (let n = 0; n < g_oversample; n++) {
         const x = f32(n) - center;
         const pix = f32(Math.PI) * x / f32(g_oversample) * cutoff;  // 正規化カットオフ = 1/oversample
         let val: f32;
@@ -127,21 +112,20 @@ function generateDecimationTable(): void {
             val = f32(Math.sin(f64(pix))) / pix;
         }
         // Kaiser窓 β=8
-        val *= kaiserWindow(n, N, f32(8.0));
+        val *= kaiserWindow(n, g_oversample, f32(8.0));
         store<f32>(DECI_PTR + n * 4, val);
         sum += val;
     }
     // 正規化（DC利得=1）
-    for (let n = 0; n < N; n++) {
+    for (let n = 0; n < g_oversample; n++) {
         store<f32>(DECI_PTR + n * 4, load<f32>(DECI_PTR + n * 4) / sum);
     }
 }
 
-export function init(sampleRate: f32, aggression: f32, targetLevel: f32, expansionDepth: f32, exciteAmount: f32): void {
+export function init(taps: i32, sampleRate: f32): void {
+    g_taps = taps;
+    g_tapsMask = taps - 1;
     g_sampleRate = sampleRate;
-    g_targetLevel = targetLevel;
-    g_expansionDepth = expansionDepth;
-    g_exciteAmount = exciteAmount;
 
     // oversampleFactorをWasm内で計算（processor.jsと同じロジック）
     const baseRate: f32 = (g_sampleRate % f32(44100) == f32(0))
@@ -151,18 +135,13 @@ export function init(sampleRate: f32, aggression: f32, targetLevel: f32, expansi
     // 4の倍数に切り上げ
     g_oversample = ((raw + 3) >> 2) << 2;
 
-    G1 = aggression;
-    G2 = G1 * f32(0.75); G3 = G2 * f32(0.55);
-    G4 = G3 * f32(0.35); G5 = G4 * f32(0.20);
-    G6 = G5 * f32(0.15); G7 = G6 * f32(0.10);
-
     b1 = f32(Math.pow(f64((f32(2) * f32(Math.PI) * f32(4000)) / g_sampleRate), 2));
     b2 = f32(Math.pow(f64((f32(2) * f32(Math.PI) * f32(8000)) / g_sampleRate), 2));
     b3 = f32(Math.pow(f64((f32(2) * f32(Math.PI) * f32(14000)) / g_sampleRate), 2));
 
     // ハイパスフィルタの係数計算（カットオフ周波数 fc を指定）
     // 1次後退差分による簡易HPF係数// カットオフ周波数 Hz（10kHz）
-    g_hpCoeff = f32(1.0) - f32(2.0) * f32(Math.PI) * f32(4000.0) / (g_sampleRate * f32(g_oversample));
+    g_hpCoeff = f32(1.0) - f32(2.0) * f32(Math.PI) * f32(800.0) / (g_sampleRate * f32(g_oversample));
 
     // Polyphaseテーブル生成
     generatePolyphaseTable();
@@ -187,13 +166,24 @@ export function resetState(): void {
         store<f32>(HIST_L + n, f32(0.0));
         store<f32>(HIST_R + n, f32(0.0));
     }
+    // デシメーション用FBバッファ
+    for (let n: usize = 0; n < usize(g_oversample) * 4; n += 4) {
+        store<f32>(FB_BUF_L + n, f32(0.0));
+        store<f32>(FB_BUF_R + n, f32(0.0));
+    }
 }
 
 @inline
 function processChannel(
-    len: i32,
+    len: i32, aggression: f32, targetLevel: f32, expansionDepth: f32, exciteAmount: f32,
     inP: usize, outP: usize, histP: usize, sP: usize, fbP: usize
 ): void {
+
+    const G1 = aggression;
+    const G2 = G1 * f32(0.75); const G3 = G2 * f32(0.55);
+    const G4 = G3 * f32(0.35); const G5 = G4 * f32(0.20);
+    const G6 = G5 * f32(0.15); const G7 = G6 * f32(0.10);
+
     // 状態ロード
     let i1 = load<f32>(sP + 0); let i2 = load<f32>(sP + 4);
     let i3 = load<f32>(sP + 8); let i4 = load<f32>(sP + 12);
@@ -219,25 +209,23 @@ function processChannel(
     blockRMS = f32(Math.sqrt(f64(blockRMS / f32(len))));
 
     // ピーク/RMS追従: ifをなくし乗算で統一
-    // blockPeak > curPeak のとき: curPeak = blockPeak * 1.1
+    // blockPeak > curPeak のとき: blockPeak
     // そうでないとき:             curPeak += (blockPeak - curPeak) * 0.0001
     // → 両方計算して選択（条件移動命令に最適化される）
-    const peakAttack = blockPeak * f32(1.1);
     const peakRelease = curPeak + (blockPeak - curPeak) * f32(0.0001);
-    curPeak = blockPeak > curPeak ? peakAttack : peakRelease;
+    curPeak = blockPeak > curPeak ? blockPeak : peakRelease;
 
-    const rmsAttack = blockRMS * f32(1.05);
     const rmsRelease = curRMS + (blockRMS - curRMS) * f32(0.00005);
-    curRMS = blockRMS > curRMS ? rmsAttack : rmsRelease;
+    curRMS = blockRMS > curRMS ? blockRMS : rmsRelease;
 
     // 3. ゲインの計算 (冪乗カーブを含む)
     const safePeak: f32 = curPeak > f32(0.01) ? curPeak : f32(0.01);
     const safeRMS: f32 = curRMS > f32(0.005) ? curRMS : f32(0.005);
-    const baseGain = g_targetLevel / safePeak;
-    const expansionFactor = f32(Math.pow(f64(safePeak), f64(g_expansionDepth - f32(1.0))));
+    const baseGain = targetLevel / safePeak;
+    const expansionFactor = f32(Math.pow(f64(safePeak), f64(expansionDepth - f32(1.0))));
     // RMSが小さい時（残響・弱音）に動作点を上げる補正
     // RMSが低いほど追加ゲインがかかる、ただし上限を設ける
-    const rmsBoost: f32 = f32(0.15) / safeRMS < f32(1.4) ? f32(0.15) / safeRMS : f32(1.4);
+    const rmsBoost: f32 = f32(0.25) / safeRMS < f32(2.0) ? f32(0.25) / safeRMS : f32(2.0);
 
     const targetGain = f32(baseGain * expansionFactor) * rmsBoost;
 
@@ -277,7 +265,7 @@ function processChannel(
                 // HPFで高域成分を取り出す
                 let hp: f32 = x - hpState;
                 hpState = hpState * g_hpCoeff + x * (f32(1.0) - g_hpCoeff);
-                let x_excited: f32 = x + hp * g_exciteAmount;
+                let x_excited: f32 = x + hp * exciteAmount;
 
                 // ΔΣ
                 let delta: f32 = x_excited - fb;
@@ -288,7 +276,7 @@ function processChannel(
                 i5 += i4 * G5;
                 i6 += (i5 - i7 * b3) * G6;
                 i7 += i6 * G7;
-                fb = hardClip(i1 * W1 + i2 * W2 + i3 * W3 + i4 * W4 + i5 * W5 + i6 * W6 + i7 * W7);
+                fb = i1 * W1 + i2 * W2 + i3 * W3 + i4 * W4 + i5 * W5 + i6 * W6 + i7 * W7;
 
                 // fbを別バッファに蓄積してからFIR
                 let fbBufIdx = j + sub;  // 0〜oversample-1
@@ -297,7 +285,7 @@ function processChannel(
             }
         }
 
-        if (isNaN(i1) || f32(Math.abs(i1)) > f32(8.0)) {
+        if (isNaN(i1) || f32(Math.abs(i1)) > f32(2.0)) {
             i1 = i2 = i3 = i4 = i5 = i6 = i7 = fb = f32(0.0);
         }
         let out: f32 = f32(0.0);
@@ -319,14 +307,14 @@ function processChannel(
     store<i32>(sP + 48, writePos); // i32として保存
 }
 
-export function process_simd(len: i32): void {
+export function process_simd(len: i32, aggression: f32, targetLevel: f32, expansionDepth: f32, exciteAmount: f32): void {
     // LとRを明示的に個別呼び出し
     processChannel(
-        len,
+        len, aggression, targetLevel, expansionDepth, exciteAmount,
         INPUT_L, OUTPUT_L, HIST_L, STATE_L, FB_BUF_L
     );
     processChannel(
-        len,
+        len, aggression, targetLevel, expansionDepth, exciteAmount,
         INPUT_R, OUTPUT_R, HIST_R, STATE_R, FB_BUF_R
     );
 }

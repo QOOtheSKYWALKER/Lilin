@@ -5,7 +5,6 @@ class DeltaSigmaProcessor extends AudioWorkletProcessor {
 
     constructor(options) {
         super();
-        this.taps = 128;
 
         this.silenceThreshold = 0.0001;  // この値以下を無音とみなす
         this.silenceFrames = 0;
@@ -14,10 +13,11 @@ class DeltaSigmaProcessor extends AudioWorkletProcessor {
 
         // ユーザーが後から変更可能なパラメータ
         this.params = {
+            taps: 128,
             targetLevel: 0.70,
             expansionDepth: 1.15,
             aggression: 0.75,
-            exciteAmount: 0.1,
+            exciteAmount: 0.2,
         };
 
         this.initialized = false;
@@ -38,7 +38,7 @@ class DeltaSigmaProcessor extends AudioWorkletProcessor {
             // sincTablePtr, historyPtr, statePtrの定義は不要になる
 
             // init一発でテーブル生成・状態初期化・oversample計算がすべて完了
-            this.exports.init(sampleRate || 44100, this.params.aggression, this.params.targetLevel, this.params.expansionDepth, this.params.exciteAmount);
+            this.exports.init(this.params.taps, sampleRate || 44100);
 
             this.wasmInputL = new Float32Array(this.memory.buffer, this.inputLPtr, 128);
             this.wasmInputR = new Float32Array(this.memory.buffer, this.inputRPtr, 128);
@@ -97,7 +97,7 @@ class DeltaSigmaProcessor extends AudioWorkletProcessor {
         this.wasmInputL.set(input[0]);
         this.wasmInputR.set(input[1] || input[0]);
 
-        this.exports.process_simd(bufferLen);
+        this.exports.process_simd(bufferLen, this.params.aggression, this.params.targetLevel, this.params.expansionDepth, this.params.exciteAmount);
 
         output[0].set(this.wasmOutputL);
         output[1].set(this.wasmOutputR);
