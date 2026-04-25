@@ -128,8 +128,7 @@ export function init(taps: i32, sampleRate: f32): void {
     g_sampleRate = sampleRate;
 
     // oversampleFactorをWasm内で計算（processor.jsと同じロジック）
-    const baseRate: f32 = (g_sampleRate % f32(44100) == f32(0))
-        ? f32(44100) : f32(48000);
+    const baseRate: f32 = (g_sampleRate % f32(44100) == f32(0)) ? f32(44100) : f32(48000);
     const targetRate: f32 = baseRate * f32(128);
     const raw: i32 = i32(Math.round(f64(targetRate / g_sampleRate)));
     // 4の倍数に切り上げ
@@ -140,8 +139,8 @@ export function init(taps: i32, sampleRate: f32): void {
     b3 = f32(Math.pow(f64((f32(2) * f32(Math.PI) * f32(14000)) / g_sampleRate), 2));
 
     // ハイパスフィルタの係数計算（カットオフ周波数 fc を指定）
-    // 1次後退差分による簡易HPF係数// カットオフ周波数 Hz（10kHz）
-    g_hpCoeff = f32(1.0) - f32(2.0) * f32(Math.PI) * f32(800.0) / (g_sampleRate * f32(g_oversample));
+    // 1次後退差分による簡易HPF係数// カットオフ周波数 Hz（1kHz）
+    g_hpCoeff = f32(1.0) - f32(2.0) * f32(Math.PI) * f32(1000.0) / (g_sampleRate * f32(g_oversample));
 
     // Polyphaseテーブル生成
     generatePolyphaseTable();
@@ -200,7 +199,7 @@ function processChannel(
     let blockPeak: f32 = 0.0;
     let blockRMS: f32 = 0.0;
     for (let i = 0; i < len; i++) {
-        let s = load<f32>(inP + i * 4);
+        const s = load<f32>(inP + i * 4);
         const a: f32 = s < f32(0.0) ? -s : s;
         // select: aがblockPeakより大きければa、そうでなければblockPeak
         blockPeak = a > blockPeak ? a : blockPeak;
@@ -233,7 +232,7 @@ function processChannel(
     // lastGain==0のとき targetGainを使う → lastGain + (targetGain-lastGain)*(lastGain==0?1:0)
     // AssemblyScriptではselect組み込みが使える
     lastGain = select<f32>(targetGain, lastGain, lastGain == f32(0));
-    let gainStep = (targetGain - lastGain) / f32(len);
+    const gainStep = (targetGain - lastGain) / f32(len);
     let currentGain = lastGain;
 
     for (let i = 0; i < len; i++) {
@@ -242,33 +241,31 @@ function processChannel(
         const newestPos = writePos;
         writePos = (writePos + 1) & g_tapsMask;
 
-        let vAcc = f32x4.splat(0.0); // 4位相分のアキュムレータ
-
         for (let j = 0; j < g_oversample; j += 4) {
-            vAcc = f32x4.splat(0.0);
+            let vAcc = f32x4.splat(0.0); // 4位相分のアキュムレータ
 
             for (let k = 0; k < g_taps; k++) {
-                let bufIdx: i32 = (newestPos - k + g_taps) & g_tapsMask;
-                let h: f32 = load<f32>(histP + bufIdx * 4);
+                const bufIdx: i32 = (newestPos - k + g_taps) & g_tapsMask;
+                const h: f32 = load<f32>(histP + bufIdx * 4);
                 // transTable[k * oversample + j] の4要素を一括ロード
-                let coeff = v128.load(SINC_PTR + (k * g_oversample + j) * 4);
+                const coeff = v128.load(SINC_PTR + (k * g_oversample + j) * 4);
                 vAcc = f32x4.add(vAcc, f32x4.mul(f32x4.splat(h), coeff));
             }
 
             // 4サブサンプルをΔΣに投入
             for (let sub = 0; sub < 4; sub++) {
-                let x: f32 = sub == 0 ? f32x4.extract_lane(vAcc, 0) :
+                const x: f32 = sub == 0 ? f32x4.extract_lane(vAcc, 0) :
                     sub == 1 ? f32x4.extract_lane(vAcc, 1) :
                         sub == 2 ? f32x4.extract_lane(vAcc, 2) :
                             f32x4.extract_lane(vAcc, 3);
 
                 // HPFで高域成分を取り出す
-                let hp: f32 = x - hpState;
+                const hp: f32 = x - hpState;
                 hpState = hpState * g_hpCoeff + x * (f32(1.0) - g_hpCoeff);
-                let x_excited: f32 = x + hp * exciteAmount;
+                const x_excited: f32 = x + hp * exciteAmount;
 
                 // ΔΣ
-                let delta: f32 = x_excited - fb;
+                const delta: f32 = x_excited - fb;
                 i1 += delta * G1;
                 i2 += (i1 - i3 * b1) * G2;
                 i3 += i2 * G3;
@@ -279,7 +276,7 @@ function processChannel(
                 fb = i1 * W1 + i2 * W2 + i3 * W3 + i4 * W4 + i5 * W5 + i6 * W6 + i7 * W7;
 
                 // fbを別バッファに蓄積してからFIR
-                let fbBufIdx = j + sub;  // 0〜oversample-1
+                const fbBufIdx = j + sub;  // 0〜oversample-1
                 store<f32>(fbP + fbBufIdx * 4, fb);
 
             }
