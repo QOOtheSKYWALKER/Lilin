@@ -174,7 +174,7 @@ export function resetState(): void {
 
 @inline
 function processChannel(
-    len: i32, aggression: f32, targetLevel: f32, expansionDepth: f32, exciteAmount: f32,
+    len: i32, aggression: f32, expansionDepth: f32, exciteAmount: f32,
     inP: usize, outP: usize, histP: usize, sP: usize, fbP: usize
 ): void {
 
@@ -218,26 +218,24 @@ function processChannel(
     curRMS = blockRMS > curRMS ? blockRMS : rmsRelease;
 
     // 3. ゲインの計算 (冪乗カーブを含む)
-    const safePeak: f32 = curPeak > f32(0.01) ? curPeak : f32(0.01);
     const safeRMS: f32 = curRMS > f32(0.005) ? curRMS : f32(0.005);
-    const baseGain = targetLevel / safePeak;
-    const expansionFactor = f32(Math.pow(f64(safePeak), f64(expansionDepth - f32(1.0))));
-    // RMSが小さい時（残響・弱音）に動作点を上げる補正
-    // RMSが低いほど追加ゲインがかかる、ただし上限を設ける
-    const rmsBoost: f32 = f32(0.25) / safeRMS < f32(2.0) ? f32(0.25) / safeRMS : f32(2.0);
+    // curPeak=0.5を基準点として、それより大きければ1以上、小さければ1未満
+    const expansionFactor = f32(Math.pow(f64(curPeak / f32(0.5)), f64(expansionDepth - f32(1.0))));
+    // curPeak=0.5 → (0.5/0.5)^0.15 = 1.0
+    // curPeak=0.8 → (0.8/0.5)^0.15 ≈ 1.07（大きい音をさらに持ち上げ）
+    // curPeak=0.1 → (0.1/0.5)^0.15 ≈ 0.79（小さい音を抑制）
 
-    const targetGain = f32(baseGain * expansionFactor) * rmsBoost;
-
-    // 前回のゲインから緩やかに遷移させるためのステップ
-    // lastGain==0のとき targetGainを使う → lastGain + (targetGain-lastGain)*(lastGain==0?1:0)
-    // AssemblyScriptではselect組み込みが使える
-    lastGain = select<f32>(targetGain, lastGain, lastGain == f32(0));
-    const gainStep = (targetGain - lastGain) / f32(len);
-    let currentGain = lastGain;
+    // RMSが低い時だけ（残響域）ゲインを上げる
+    // 通常音量（RMS > 0.15）では効果なし
+    const rmsBoostRaw = f32(0.25) / safeRMS;
+    const rmsBoost: f32 = rmsBoostRaw < f32(1.0) ? f32(1.0) :  // 通常音量では1.0以上にしない
+        rmsBoostRaw < f32(2.0) ? rmsBoostRaw : f32(2.0);
+    let currentGain = expansionFactor * rmsBoost;
 
     for (let i = 0; i < len; i++) {
-        currentGain += gainStep;
-        store<f32>(histP + writePos * 4, load<f32>(inP + i * 4) * currentGain);
+        // ゲインスムーズ（前回のゲインから急激に変化させない）
+        lastGain += (currentGain - lastGain) * f32(0.1);
+        store<f32>(histP + writePos * 4, load<f32>(inP + i * 4) * lastGain);
         const newestPos = writePos;
         writePos = (writePos + 1) & g_tapsMask;
 
@@ -282,14 +280,14 @@ function processChannel(
             }
         }
 
-        if (isNaN(i1) || f32(Math.abs(i1)) > f32(2.0)) {
+        if (isNaN(i1)) {
             i1 = i2 = i3 = i4 = i5 = i6 = i7 = fb = f32(0.0);
         }
         let out: f32 = f32(0.0);
         for (let n = 0; n < g_oversample; n++) {
             out += load<f32>(fbP + n * 4) * load<f32>(DECI_PTR + n * 4);
         }
-        store<f32>(outP + i * 4, out / currentGain);
+        store<f32>(outP + i * 4, out);
     }
 
     // 状態保存（writePosを追加）
@@ -298,20 +296,20 @@ function processChannel(
     store<f32>(sP + 16, i5); store<f32>(sP + 20, i6);
     store<f32>(sP + 24, i7); store<f32>(sP + 28, fb);
     store<f32>(sP + 32, curPeak);
-    store<f32>(sP + 36, currentGain);
+    store<f32>(sP + 36, lastGain);
     store<f32>(sP + 40, hpState);
     store<f32>(sP + 44, curRMS);
     store<i32>(sP + 48, writePos); // i32として保存
 }
 
-export function process_simd(len: i32, aggression: f32, targetLevel: f32, expansionDepth: f32, exciteAmount: f32): void {
+export function process_simd(len: i32, aggression: f32, expansionDepth: f32, exciteAmount: f32): void {
     // LとRを明示的に個別呼び出し
     processChannel(
-        len, aggression, targetLevel, expansionDepth, exciteAmount,
+        len, aggression, expansionDepth, exciteAmount,
         INPUT_L, OUTPUT_L, HIST_L, STATE_L, FB_BUF_L
     );
     processChannel(
-        len, aggression, targetLevel, expansionDepth, exciteAmount,
+        len, aggression, expansionDepth, exciteAmount,
         INPUT_R, OUTPUT_R, HIST_R, STATE_R, FB_BUF_R
     );
 }

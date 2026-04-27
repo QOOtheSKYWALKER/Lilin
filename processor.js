@@ -14,10 +14,9 @@ class DeltaSigmaProcessor extends AudioWorkletProcessor {
         // ユーザーが後から変更可能なパラメータ
         this.params = {
             taps: 128,
-            targetLevel: 0.50,
-            expansionDepth: 1.15,
+            expansionDepth: 1.1,
             aggression: 0.75,
-            exciteAmount: 0.20,
+            exciteAmount: 0.10,
         };
 
         this.initialized = false;
@@ -97,7 +96,7 @@ class DeltaSigmaProcessor extends AudioWorkletProcessor {
         this.wasmInputL.set(input[0]);
         this.wasmInputR.set(input[1] || input[0]);
 
-        this.exports.process_simd(bufferLen, this.params.aggression, this.params.targetLevel, this.params.expansionDepth, this.params.exciteAmount);
+        this.exports.process_simd(bufferLen, this.params.aggression, this.params.expansionDepth, this.params.exciteAmount);
 
         output[0].set(this.wasmOutputL);
         output[1].set(this.wasmOutputR);
