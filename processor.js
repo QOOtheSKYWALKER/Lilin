@@ -13,7 +13,7 @@ class DeltaSigmaProcessor extends AudioWorkletProcessor {
 
         // ユーザーが後から変更可能なパラメータ
         this.params = {
-            taps: 128,
+            taps: 64,
             expansionDepth: 1.1,
             aggression: 0.75,
             exciteAmount: 0.10,
@@ -32,9 +32,10 @@ class DeltaSigmaProcessor extends AudioWorkletProcessor {
             this.memory = this.exports.memory;
 
             // ポインタ定義はJS側でも入出力バッファのために必要
-            this.inputLPtr = 10000; this.inputRPtr = 20000;
-            this.outputLPtr = 30000; this.outputRPtr = 40000;
-            // sincTablePtr, historyPtr, statePtrの定義は不要になる
+            this.inputLPtr = 8192;
+            this.inputRPtr = 8704;
+            this.outputLPtr = 9216;
+            this.outputRPtr = 9728;
 
             // init一発でテーブル生成・状態初期化・oversample計算がすべて完了
             this.exports.init(this.params.taps, sampleRate || 44100);

@@ -26,25 +26,26 @@ let g_oversample: i32 = 0;
 let g_sampleRate: f32 = 0.0;
 let g_hpCoeff: f32 = 0.0;
 
-// 固定メモリアドレス（processor.jsのPtr定義と一致させる）
-const INPUT_L: usize = 10000;
-const INPUT_R: usize = 20000;
-const OUTPUT_L: usize = 30000;
-const OUTPUT_R: usize = 40000;
-const SINC_PTR: usize = 50000;
-const HIST_L: usize = 1100000;
-const HIST_R: usize = 1200000;
-const STATE_L: usize = 1300000;
-const STATE_R: usize = 1400000;
-// デシメーション用テーブルをWasmメモリに追加
-const DECI_PTR: usize = 200000; // 新規アドレス（50000 + 128*128*4 = 115712でSINCと被らないか確認）
-const FB_BUF_L: usize = 300000;     //FIR用バッファ
-const FB_BUF_R: usize = 300000 + 128 * 4;  // 128サンプル×4byte = 512byte後ろ
+// 固定メモリアドレス（16byteアライメント保証）
+// 8KB以降から開始（ASランタイム領域を確実に避ける）
+const INPUT_L: usize = 8192;   // 512byte
+const INPUT_R: usize = 8704;   // 512byte
+const OUTPUT_L: usize = 9216;   // 512byte
+const OUTPUT_R: usize = 9728;   // 512byte
+const SINC_PTR: usize = 10240;   // 65536byte（128tap×128oversample×4byte）
+const DECI_PTR: usize = 76288;  // 512byte（128oversample×4byte）
+const FB_BUF_L: usize = 76800;  // 512byte
+const FB_BUF_R: usize = 77312;  // 512byte
+const HIST_L: usize = 77824;  // 512byte（128tap×4byte）
+const HIST_R: usize = 78336;  // 512byte
+const STATE_L: usize = 78848;  // 52byte（13要素×4byte）
+const STATE_R: usize = 78912;  // 52byte（16byteアライメントで78912）
+// 総使用量: 78,964 byte ≈ 77KB（2Wasmページ以内）
+// 最大128oversample, 128tapsに対応。増やす場合はアドレス修正が必要
 
 // Kaiser窓の実装（generatePolyphaseTable内で置き換え）
 // β = 8.0 → 阻止域減衰 ~80dB、遷移帯域は狭い
 // β = 10.0 → 阻止域減衰 ~100dB、さらに急峻
-
 @inline
 function kaiserWindow(i: i32, N: i32, beta: f32): f32 {
     const n_f = f32(N - 1);
@@ -153,7 +154,7 @@ export function init(taps: i32, sampleRate: f32): void {
 export function resetState(): void {
     // 積分器・AGC・履歴をすべてゼロクリア
     // stateは13要素×4byte=52byte、historyはtaps要素×4byte
-    for (let n: usize = 0; n < 13 * 4; n += 4) {
+    for (let n: usize = 0; n < 12 * 4; n += 4) {
         store<f32>(STATE_L + n, f32(0.0));
         store<f32>(STATE_R + n, f32(0.0));
     }
@@ -173,143 +174,164 @@ export function resetState(): void {
 }
 
 @inline
-function processChannel(
-    len: i32, aggression: f32, expansionDepth: f32, exciteAmount: f32,
-    inP: usize, outP: usize, histP: usize, sP: usize, fbP: usize
-): void {
-
-    const G1 = aggression;
-    const G2 = G1 * f32(0.75); const G3 = G2 * f32(0.55);
-    const G4 = G3 * f32(0.35); const G5 = G4 * f32(0.20);
-    const G6 = G5 * f32(0.15); const G7 = G6 * f32(0.10);
-
-    // 状態ロード
-    let i1 = load<f32>(sP + 0); let i2 = load<f32>(sP + 4);
-    let i3 = load<f32>(sP + 8); let i4 = load<f32>(sP + 12);
-    let i5 = load<f32>(sP + 16); let i6 = load<f32>(sP + 20);
-    let i7 = load<f32>(sP + 24); let fb = load<f32>(sP + 28);
-    let curPeak = load<f32>(sP + 32);
-    let lastGain = load<f32>(sP + 36);
-    let hpState = load<f32>(sP + 40);
-    let curRMS = load<f32>(sP + 44);
-    let writePos = load<i32>(sP + 48);
-
-    // ブロックピーク（既存、エキスパンダー用）
-    // ブロックRMS（新規追加、弱音動作点用）
-    let blockPeak: f32 = 0.0;
-    let blockRMS: f32 = 0.0;
-    for (let i = 0; i < len; i++) {
-        const s = load<f32>(inP + i * 4);
-        const a: f32 = s < f32(0.0) ? -s : s;
-        // select: aがblockPeakより大きければa、そうでなければblockPeak
-        blockPeak = a > blockPeak ? a : blockPeak;
-        blockRMS += s * s;
-    }
-    blockRMS = f32(Math.sqrt(f64(blockRMS / f32(len))));
-
-    // ピーク/RMS追従: ifをなくし乗算で統一
-    // blockPeak > curPeak のとき: blockPeak
-    // そうでないとき:             curPeak += (blockPeak - curPeak) * 0.0001
-    // → 両方計算して選択（条件移動命令に最適化される）
-    const peakRelease = curPeak + (blockPeak - curPeak) * f32(0.0001);
-    curPeak = blockPeak > curPeak ? blockPeak : peakRelease;
-
-    const rmsRelease = curRMS + (blockRMS - curRMS) * f32(0.00005);
-    curRMS = blockRMS > curRMS ? blockRMS : rmsRelease;
-
-    // 3. ゲインの計算 (冪乗カーブを含む)
-    const safeRMS: f32 = curRMS > f32(0.005) ? curRMS : f32(0.005);
-    // curPeak=0.5を基準点として、それより大きければ1以上、小さければ1未満
-    const expansionFactor = f32(Math.pow(f64(curPeak / f32(0.5)), f64(expansionDepth - f32(1.0))));
-    // curPeak=0.5 → (0.5/0.5)^0.15 = 1.0
-    // curPeak=0.8 → (0.8/0.5)^0.15 ≈ 1.07（大きい音をさらに持ち上げ）
-    // curPeak=0.1 → (0.1/0.5)^0.15 ≈ 0.79（小さい音を抑制）
-
-    // RMSが低い時だけ（残響域）ゲインを上げる
-    // 通常音量（RMS > 0.15）では効果なし
-    const rmsBoostRaw = f32(0.25) / safeRMS;
-    const rmsBoost: f32 = rmsBoostRaw < f32(1.0) ? f32(1.0) :  // 通常音量では1.0以上にしない
-        rmsBoostRaw < f32(2.0) ? rmsBoostRaw : f32(2.0);
-    let currentGain = expansionFactor * rmsBoost;
-
-    for (let i = 0; i < len; i++) {
-        // ゲインスムーズ（前回のゲインから急激に変化させない）
-        lastGain += (currentGain - lastGain) * f32(0.1);
-        store<f32>(histP + writePos * 4, load<f32>(inP + i * 4) * lastGain);
-        const newestPos = writePos;
-        writePos = (writePos + 1) & g_tapsMask;
-
-        for (let j = 0; j < g_oversample; j += 4) {
-            let vAcc = f32x4.splat(0.0); // 4位相分のアキュムレータ
-
-            for (let k = 0; k < g_taps; k++) {
-                const bufIdx: i32 = (newestPos - k + g_taps) & g_tapsMask;
-                const h: f32 = load<f32>(histP + bufIdx * 4);
-                // transTable[k * oversample + j] の4要素を一括ロード
-                const coeff = v128.load(SINC_PTR + (k * g_oversample + j) * 4);
-                vAcc = f32x4.add(vAcc, f32x4.mul(f32x4.splat(h), coeff));
-            }
-
-            // 4サブサンプルをΔΣに投入
-            for (let sub = 0; sub < 4; sub++) {
-                const x: f32 = sub == 0 ? f32x4.extract_lane(vAcc, 0) :
-                    sub == 1 ? f32x4.extract_lane(vAcc, 1) :
-                        sub == 2 ? f32x4.extract_lane(vAcc, 2) :
-                            f32x4.extract_lane(vAcc, 3);
-
-                // HPFで高域成分を取り出す
-                const hp: f32 = x - hpState;
-                hpState = hpState * g_hpCoeff + x * (f32(1.0) - g_hpCoeff);
-                const x_excited: f32 = x + hp * exciteAmount;
-
-                // ΔΣ
-                const delta: f32 = x_excited - fb;
-                i1 += delta * G1;
-                i2 += (i1 - i3 * b1) * G2;
-                i3 += i2 * G3;
-                i4 += (i3 - i5 * b2) * G4;
-                i5 += i4 * G5;
-                i6 += (i5 - i7 * b3) * G6;
-                i7 += i6 * G7;
-                fb = i1 * W1 + i2 * W2 + i3 * W3 + i4 * W4 + i5 * W5 + i6 * W6 + i7 * W7;
-
-                // fbを別バッファに蓄積してからFIR
-                const fbBufIdx = j + sub;  // 0〜oversample-1
-                store<f32>(fbP + fbBufIdx * 4, fb);
-
-            }
-        }
-
-        if (isNaN(i1)) {
-            i1 = i2 = i3 = i4 = i5 = i6 = i7 = fb = f32(0.0);
-        }
-        let out: f32 = f32(0.0);
-        for (let n = 0; n < g_oversample; n++) {
-            out += load<f32>(fbP + n * 4) * load<f32>(DECI_PTR + n * 4);
-        }
-        store<f32>(outP + i * 4, out);
-    }
-
-    // 状態保存（writePosを追加）
-    store<f32>(sP + 0, i1); store<f32>(sP + 4, i2);
-    store<f32>(sP + 8, i3); store<f32>(sP + 12, i4);
-    store<f32>(sP + 16, i5); store<f32>(sP + 20, i6);
-    store<f32>(sP + 24, i7); store<f32>(sP + 28, fb);
-    store<f32>(sP + 32, curPeak);
-    store<f32>(sP + 36, lastGain);
-    store<f32>(sP + 40, hpState);
-    store<f32>(sP + 44, curRMS);
-    store<i32>(sP + 48, writePos); // i32として保存
+function pack2(l: f32, r: f32): v128 {
+    return f32x4.replace_lane(f32x4.replace_lane(f32x4.splat(0), 0, l), 1, r);
+    // lane0=l, lane1=r, lane2=0, lane3=0
 }
 
 export function process_simd(len: i32, aggression: f32, expansionDepth: f32, exciteAmount: f32): void {
-    // LとRを明示的に個別呼び出し
-    processChannel(
-        len, aggression, expansionDepth, exciteAmount,
-        INPUT_L, OUTPUT_L, HIST_L, STATE_L, FB_BUF_L
-    );
-    processChannel(
-        len, aggression, expansionDepth, exciteAmount,
-        INPUT_R, OUTPUT_R, HIST_R, STATE_R, FB_BUF_R
-    );
+    const G1 = aggression;
+    const G2 = G1 * f32(0.75);
+    const G3 = G2 * f32(0.55);
+    const G4 = G3 * f32(0.35);
+    const G5 = G4 * f32(0.20);
+    const G6 = G5 * f32(0.15);
+    const G7 = G6 * f32(0.10);
+
+    const v_G1 = f32x4.splat(G1); const v_G2 = f32x4.splat(G2); const v_G3 = f32x4.splat(G3);
+    const v_G4 = f32x4.splat(G4); const v_G5 = f32x4.splat(G5); const v_G6 = f32x4.splat(G6); const v_G7 = f32x4.splat(G7);
+    const v_b1 = f32x4.splat(b1); const v_b2 = f32x4.splat(b2); const v_b3 = f32x4.splat(b3);
+    const v_W1 = f32x4.splat(W1); const v_W2 = f32x4.splat(W2); const v_W3 = f32x4.splat(W3);
+    const v_W4 = f32x4.splat(W4); const v_W5 = f32x4.splat(W5); const v_W6 = f32x4.splat(W6); const v_W7 = f32x4.splat(W7);
+    const v_hpC = f32x4.splat(g_hpCoeff); const v_lpC = f32x4.splat(f32(1.0) - g_hpCoeff);
+    const v_exAmt = f32x4.splat(exciteAmount);
+
+    // Load States
+    let v_i1 = pack2(load<f32>(STATE_L + 0), load<f32>(STATE_R + 0));
+    let v_i2 = pack2(load<f32>(STATE_L + 4), load<f32>(STATE_R + 4));
+    let v_i3 = pack2(load<f32>(STATE_L + 8), load<f32>(STATE_R + 8));
+    let v_i4 = pack2(load<f32>(STATE_L + 12), load<f32>(STATE_R + 12));
+    let v_i5 = pack2(load<f32>(STATE_L + 16), load<f32>(STATE_R + 16));
+    let v_i6 = pack2(load<f32>(STATE_L + 20), load<f32>(STATE_R + 20));
+    let v_i7 = pack2(load<f32>(STATE_L + 24), load<f32>(STATE_R + 24));
+    let v_fb = pack2(load<f32>(STATE_L + 28), load<f32>(STATE_R + 28));
+    let v_curPeak = pack2(load<f32>(STATE_L + 32), load<f32>(STATE_R + 32));
+    let v_lastGain = pack2(load<f32>(STATE_L + 36), load<f32>(STATE_R + 36));
+    let v_hpState = pack2(load<f32>(STATE_L + 40), load<f32>(STATE_R + 40));
+    let v_curRMS = pack2(load<f32>(STATE_L + 44), load<f32>(STATE_R + 44));
+    let writePos_L = load<i32>(STATE_L + 48);
+    let writePos_R = load<i32>(STATE_R + 48);
+
+    // Block AGC
+    let v_blockPeak = f32x4.splat(0);
+    let v_blockRMS = f32x4.splat(0);
+    for (let i = 0; i < len; i++) {
+        let v_s = pack2(load<f32>(INPUT_L + i * 4), load<f32>(INPUT_R + i * 4));
+        let v_a = f32x4.abs(v_s);
+        v_blockPeak = f32x4.max(v_blockPeak, v_a);
+        v_blockRMS = f32x4.add(v_blockRMS, f32x4.mul(v_s, v_s));
+    }
+    v_blockRMS = f32x4.sqrt(f32x4.div(v_blockRMS, f32x4.splat(f32(len))));
+
+    // AGC Update
+    let v_peakRel = f32x4.add(v_curPeak, f32x4.mul(f32x4.sub(v_blockPeak, v_curPeak), f32x4.splat(0.0001)));
+    v_curPeak = f32x4.max(v_blockPeak, v_peakRel);
+    let v_rmsRel = f32x4.add(v_curRMS, f32x4.mul(f32x4.sub(v_blockRMS, v_curRMS), f32x4.splat(0.00005)));
+    v_curRMS = f32x4.max(v_blockRMS, v_rmsRel);
+
+    let v_safeRMS = f32x4.max(v_curRMS, f32x4.splat(0.005));
+    let expL = f32(Math.pow(f64(f32x4.extract_lane(v_curPeak, 0) / f32(0.5)), f64(expansionDepth - f32(1.0))));
+    let expR = f32(Math.pow(f64(f32x4.extract_lane(v_curPeak, 1) / f32(0.5)), f64(expansionDepth - f32(1.0))));
+    let v_expFact = pack2(expL, expR);
+    let v_rmsBoostRaw = f32x4.div(f32x4.splat(0.25), v_safeRMS);
+    let v_rmsBoost = f32x4.max(f32x4.splat(1.0), f32x4.min(v_rmsBoostRaw, f32x4.splat(2.0)));
+    let v_currentGain = f32x4.mul(v_expFact, v_rmsBoost);
+
+    for (let i = 0; i < len; i++) {
+        v_lastGain = f32x4.add(v_lastGain, f32x4.mul(f32x4.sub(v_currentGain, v_lastGain), f32x4.splat(0.1)));
+        let v_inRaw = pack2(load<f32>(INPUT_L + i * 4), load<f32>(INPUT_R + i * 4));
+        let v_in = f32x4.mul(v_inRaw, v_lastGain);
+        store<f32>(HIST_L + writePos_L * 4, f32x4.extract_lane(v_in, 0));
+        store<f32>(HIST_R + writePos_R * 4, f32x4.extract_lane(v_in, 1));
+        const nPL = writePos_L; const nPR = writePos_R;
+        writePos_L = (writePos_L + 1) & g_tapsMask;
+        writePos_R = (writePos_R + 1) & g_tapsMask;
+
+        // --- Delta-Sigma Sequential Processing (4 phases) ---
+        for (let j = 0; j < g_oversample; j += 4) {
+
+            // FIR: 4位相同時計算（LR独立）
+            let v_accL = f32x4.splat(0);
+            let v_accR = f32x4.splat(0);
+            for (let k = 0; k < g_taps; k++) {
+                const hL = load<f32>(HIST_L + ((nPL - k + g_taps) & g_tapsMask) * 4);
+                const hR = load<f32>(HIST_R + ((nPR - k + g_taps) & g_tapsMask) * 4);
+                const v_c = load<v128>(SINC_PTR + (k * g_oversample + j) * 4);
+                v_accL = f32x4.add(v_accL, f32x4.mul(f32x4.splat(hL), v_c));
+                v_accR = f32x4.add(v_accR, f32x4.mul(f32x4.splat(hR), v_c));
+            }
+
+            // 4サブサンプルのΔΣ（lane0=L, lane1=R で処理）
+            for (let sub = 0; sub < 4; sub++) {
+                let v_x = pack2(
+                    sub == 0 ? f32x4.extract_lane(v_accL, 0) :
+                        sub == 1 ? f32x4.extract_lane(v_accL, 1) :
+                            sub == 2 ? f32x4.extract_lane(v_accL, 2) :
+                                f32x4.extract_lane(v_accL, 3),
+                    sub == 0 ? f32x4.extract_lane(v_accR, 0) :
+                        sub == 1 ? f32x4.extract_lane(v_accR, 1) :
+                            sub == 2 ? f32x4.extract_lane(v_accR, 2) :
+                                f32x4.extract_lane(v_accR, 3)
+                );
+
+                let v_hp = f32x4.sub(v_x, v_hpState);
+                v_hpState = f32x4.add(f32x4.mul(v_hpState, v_hpC), f32x4.mul(v_x, v_lpC));
+                let v_xEx = f32x4.add(v_x, f32x4.mul(v_hp, v_exAmt));
+
+                let v_delta = f32x4.sub(v_xEx, v_fb);
+                v_i1 = f32x4.add(v_i1, f32x4.mul(v_delta, v_G1));
+                v_i2 = f32x4.add(v_i2, f32x4.mul(f32x4.sub(v_i1, f32x4.mul(v_i3, v_b1)), v_G2));
+                v_i3 = f32x4.add(v_i3, f32x4.mul(v_i2, v_G3));
+                v_i4 = f32x4.add(v_i4, f32x4.mul(f32x4.sub(v_i3, f32x4.mul(v_i5, v_b2)), v_G4));
+                v_i5 = f32x4.add(v_i5, f32x4.mul(v_i4, v_G5));
+                v_i6 = f32x4.add(v_i6, f32x4.mul(f32x4.sub(v_i5, f32x4.mul(v_i7, v_b3)), v_G6));
+                v_i7 = f32x4.add(v_i7, f32x4.mul(v_i6, v_G7));
+
+                let v_sum123 = f32x4.add(f32x4.mul(v_i1, v_W1), f32x4.add(f32x4.mul(v_i2, v_W2), f32x4.mul(v_i3, v_W3)));
+                let v_sum456 = f32x4.add(f32x4.mul(v_i4, v_W4), f32x4.add(f32x4.mul(v_i5, v_W5), f32x4.mul(v_i6, v_W6)));
+                v_fb = f32x4.add(v_sum123, f32x4.add(v_sum456, f32x4.mul(v_i7, v_W7)));
+
+                // FB_BUFに蓄積
+                const fbIdx = j + sub;
+                store<f32>(FB_BUF_L + fbIdx * 4, f32x4.extract_lane(v_fb, 0));
+                store<f32>(FB_BUF_R + fbIdx * 4, f32x4.extract_lane(v_fb, 1));
+            }
+        }
+
+        // Robust NaN protection
+        if (isNaN(f32x4.extract_lane(v_i1, 0)) || isNaN(f32x4.extract_lane(v_i1, 1))) {
+            v_i1 = v_i2 = v_i3 = v_i4 = v_i5 = v_i6 = v_i7 = v_fb = v_hpState = f32x4.splat(0);
+        }
+
+        // デシメーション（全oversample点を使う）
+        let sumL: f32 = 0;
+        let sumR: f32 = 0;
+        for (let n = 0; n < g_oversample; n += 4) {
+            const v_fbL4 = load<v128>(FB_BUF_L + n * 4);
+            const v_fbR4 = load<v128>(FB_BUF_R + n * 4);
+            const v_d = load<v128>(DECI_PTR + n * 4);
+            const v_pL = f32x4.mul(v_fbL4, v_d);
+            const v_pR = f32x4.mul(v_fbR4, v_d);
+            sumL += f32x4.extract_lane(v_pL, 0) + f32x4.extract_lane(v_pL, 1)
+                + f32x4.extract_lane(v_pL, 2) + f32x4.extract_lane(v_pL, 3);
+            sumR += f32x4.extract_lane(v_pR, 0) + f32x4.extract_lane(v_pR, 1)
+                + f32x4.extract_lane(v_pR, 2) + f32x4.extract_lane(v_pR, 3);
+        }
+        store<f32>(OUTPUT_L + i * 4, sumL);
+        store<f32>(OUTPUT_R + i * 4, sumR);
+    }
+
+    store<f32>(STATE_L + 0, f32x4.extract_lane(v_i1, 0)); store<f32>(STATE_R + 0, f32x4.extract_lane(v_i1, 1));
+    store<f32>(STATE_L + 4, f32x4.extract_lane(v_i2, 0)); store<f32>(STATE_R + 4, f32x4.extract_lane(v_i2, 1));
+    store<f32>(STATE_L + 8, f32x4.extract_lane(v_i3, 0)); store<f32>(STATE_R + 8, f32x4.extract_lane(v_i3, 1));
+    store<f32>(STATE_L + 12, f32x4.extract_lane(v_i4, 0)); store<f32>(STATE_R + 12, f32x4.extract_lane(v_i4, 1));
+    store<f32>(STATE_L + 16, f32x4.extract_lane(v_i5, 0)); store<f32>(STATE_R + 16, f32x4.extract_lane(v_i5, 1));
+    store<f32>(STATE_L + 20, f32x4.extract_lane(v_i6, 0)); store<f32>(STATE_R + 20, f32x4.extract_lane(v_i6, 1));
+    store<f32>(STATE_L + 24, f32x4.extract_lane(v_i7, 0)); store<f32>(STATE_R + 24, f32x4.extract_lane(v_i7, 1));
+    store<f32>(STATE_L + 28, f32x4.extract_lane(v_fb, 0)); store<f32>(STATE_R + 28, f32x4.extract_lane(v_fb, 1));
+    store<f32>(STATE_L + 32, f32x4.extract_lane(v_curPeak, 0)); store<f32>(STATE_R + 32, f32x4.extract_lane(v_curPeak, 1));
+    store<f32>(STATE_L + 36, f32x4.extract_lane(v_lastGain, 0)); store<f32>(STATE_R + 36, f32x4.extract_lane(v_lastGain, 1));
+    store<f32>(STATE_L + 40, f32x4.extract_lane(v_hpState, 0)); store<f32>(STATE_R + 40, f32x4.extract_lane(v_hpState, 1));
+    store<f32>(STATE_L + 44, f32x4.extract_lane(v_curRMS, 0)); store<f32>(STATE_R + 44, f32x4.extract_lane(v_curRMS, 1));
+    store<i32>(STATE_L + 48, writePos_L); store<i32>(STATE_R + 48, writePos_R);
 }
