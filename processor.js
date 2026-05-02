@@ -13,9 +13,9 @@ class DeltaSigmaProcessor extends AudioWorkletProcessor {
 
         // ユーザーが後から変更可能なパラメータ
         this.params = {
-            taps: 128,
+            taps: 64,      //2のべき乗(...32, 64, 128)以外では動作しない（ビット演算を使用しているため）
+            oversample: 128,  //44.1kHz(48kHz)を基準とした倍率
             expansionDepth: 1.1,
-            aggression: 0.75,
             exciteAmount: 0.10,
         };
 
@@ -38,7 +38,7 @@ class DeltaSigmaProcessor extends AudioWorkletProcessor {
             this.outputRPtr = 9728;
 
             // init一発でテーブル生成・状態初期化・oversample計算がすべて完了
-            this.exports.init(this.params.taps, sampleRate || 44100);
+            this.exports.init(this.params.taps, this.params.oversample, sampleRate || 44100);
 
             this.wasmInputL = new Float32Array(this.memory.buffer, this.inputLPtr, 128);
             this.wasmInputR = new Float32Array(this.memory.buffer, this.inputRPtr, 128);
@@ -97,7 +97,7 @@ class DeltaSigmaProcessor extends AudioWorkletProcessor {
         this.wasmInputL.set(input[0]);
         this.wasmInputR.set(input[1] || input[0]);
 
-        this.exports.process_simd(bufferLen, this.params.aggression, this.params.expansionDepth, this.params.exciteAmount);
+        this.exports.process_simd(bufferLen, this.params.expansionDepth, this.params.exciteAmount);
 
         output[0].set(this.wasmOutputL);
         output[1].set(this.wasmOutputR);
