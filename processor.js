@@ -13,7 +13,7 @@ class DeltaSigmaProcessor extends AudioWorkletProcessor {
 
         // ユーザーが後から変更可能なパラメータ
         this.params = {
-            taps: 64,
+            taps: 128,
             expansionDepth: 1.1,
             aggression: 0.75,
             exciteAmount: 0.10,
