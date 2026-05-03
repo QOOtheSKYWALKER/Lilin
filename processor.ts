@@ -25,19 +25,20 @@ const G5 = f32x4.mul(G4, f32x4.splat(0.20));
 const G6 = f32x4.mul(G5, f32x4.splat(0.15));
 const G7 = f32x4.mul(G6, f32x4.splat(0.10));
 
-let g_taps: i32; let g_oversample: i32; let g_hpCoeff: f32;
+let g_taps: i32; let g_tapsMask: i32;
+let g_oversample: i32; let g_hpCoeff: f32;
 
 // --- Module-level DSP integrator state (used by processDeltaSigmaPhase) ---
 let i1: v128; let i2: v128; let i3: v128; let i4: v128;
 let i5: v128; let i6: v128; let i7: v128; let fb: v128;
-let b1: v128; let b2: v128; let b3: v128;
+let b1: v128; let b2: v128; let b3: v128; let v_hpState: v128;
 
 // Fixed memory addresses for JS interop (Zero-copy region)
-const INPUT_L: usize = 8192;   // 512byte
-const INPUT_R: usize = 8704;   // 512byte
-const OUTPUT_L: usize = 9216;   // 512byte
-const OUTPUT_R: usize = 9728;   // 512byte
-const STATE: usize = 10240; // 200byte（12×16 + 8）
+const INPUT_L: usize = 8192;
+const INPUT_R: usize = 8704;
+const OUTPUT_L: usize = 9216;
+const OUTPUT_R: usize = 9728;
+const STATE: usize = 16384;  // Start at 16KB for safety
 
 // Internal DSP buffer pointers (Dynamically allocated in init)
 let HIST_L: usize;
@@ -81,24 +82,22 @@ function besselI0(x: f32): f32 {
 // cutoff = 0.5 → カットオフを sampleRate/4 に設定
 @inline
 function generatePolyphaseTable(): void {
-    const cutoff: f32 = f32(1.0); // 1.0 = sr/2 (Nyquist), 0.5 = sr/4
-    const size = g_oversample * g_taps;
-    const center = (g_taps / 2) * g_oversample;
+    const cutoff: f32 = f32(1.0);
+    const center: f32 = f32(g_tapsMask) / f32(2.0);
     for (let tap = 0; tap < g_taps; tap++) {
         for (let phase = 0; phase < g_oversample; phase++) {
-            const i = tap * g_oversample + phase;
-            const xf = f32(i - center) / f32(g_oversample) * cutoff;
+            // 位相（0..1）を考慮した中心からの距離
+            const xf = (f32(tap) - center - f32(phase) / f32(g_oversample)) * cutoff;
             const pix = f32(Math.PI) * xf;
-            const window = kaiserWindow(i, size, f32(8.0));
+            const window = kaiserWindow(tap, g_taps, f32(8.0));
 
             let val: f32;
             if (xf == f32(0)) {
-                // sinc(0) = 1.0 に cutoff を掛けてゲインを合わせる
                 val = cutoff * window;
             } else {
-                // sin(pix)/pix に window と cutoff を掛ける
                 val = cutoff * (f32(Math.sin(f64(pix))) / pix) * window;
             }
+            // 各タップの各フェーズにストア（SIMDロード用にフェーズを連続させる）
             store<f32>(SINC_PTR + (tap * g_oversample + phase) * 4, val);
         }
     }
@@ -134,15 +133,7 @@ function generateDecimationTable(): void {
 
 export function init(taps: i32, oversample: i32, sampleRate: f32): void {
     g_taps = taps;
-
-    // --- Dynamic Memory Allocation ---
-    let ptr = align16(STATE + 200); // Start after STATE buffers（200bytes = 12×16 + 8）
-    HIST_L = ptr; ptr = align16(ptr + (taps * 4));
-    HIST_R = ptr; ptr = align16(ptr + (taps * 4));
-    FB_BUF_L = ptr; ptr = align16(ptr + (oversample * 4));
-    FB_BUF_R = ptr; ptr = align16(ptr + (oversample * 4));
-    DECI_PTR = ptr; ptr = align16(ptr + (oversample * 4));
-    SINC_PTR = ptr; // Large table at the end
+    g_tapsMask = taps - 1;
 
     // oversampleFactorをWasm内で計算（processor.jsと同じロジック）
     const baseRate: f32 = (sampleRate % f32(44100) == f32(0)) ? f32(44100) : f32(48000);
@@ -150,6 +141,15 @@ export function init(taps: i32, oversample: i32, sampleRate: f32): void {
     const raw: i32 = i32(Math.round(f64(targetRate / sampleRate)));
     // 4の倍数に切り上げ
     g_oversample = ((raw + 3) >> 2) << 2;
+
+    // --- Dynamic Memory Allocation ---
+    let ptr = align16(STATE + 200);
+    HIST_L = ptr; ptr = align16(ptr + (g_taps * 4));
+    HIST_R = ptr; ptr = align16(ptr + (g_taps * 4));
+    FB_BUF_L = ptr; ptr = align16(ptr + (g_oversample * 4));
+    FB_BUF_R = ptr; ptr = align16(ptr + (g_oversample * 4));
+    DECI_PTR = ptr; ptr = align16(ptr + (g_oversample * 4));
+    SINC_PTR = ptr; // Large table at the end
 
     b1 = f32x4.splat(f32(Math.pow(f64((f32(2) * f32(Math.PI) * f32(4000)) / sampleRate), 2)));
     b2 = f32x4.splat(f32(Math.pow(f64((f32(2) * f32(Math.PI) * f32(8000)) / sampleRate), 2)));
@@ -192,7 +192,7 @@ function pack2(l: f32, r: f32): v128 {
 
 // Process one Delta-Sigma phase.
 @inline
-function processDeltaSigmaPhase(v_x: v128, v_hpState: v128, exciteAmount: f32): void {
+function processDeltaSigmaPhase(v_x: v128, exciteAmount: f32): void {
 
     // ダイナミック・エキスパンダー（高域強調）
     const v_hp = f32x4.sub(v_x, v_hpState);
@@ -227,7 +227,7 @@ export function process_simd(len: i32, expansionDepth: f32, exciteAmount: f32): 
     fb = load<v128>(STATE + 112);
     let v_curPeak = load<v128>(STATE + 128);
     let v_lastGain = load<v128>(STATE + 144);
-    let v_hpState = load<v128>(STATE + 160);
+    v_hpState = load<v128>(STATE + 160);
     let v_curRMS = load<v128>(STATE + 176);
     let writePos_L = load<i32>(STATE + 192);
     let writePos_R = load<i32>(STATE + 196);
@@ -244,28 +244,28 @@ export function process_simd(len: i32, expansionDepth: f32, exciteAmount: f32): 
     v_blockRMS = f32x4.sqrt(f32x4.div(v_blockRMS, f32x4.splat(f32(len))));
 
     // AGC Update
-    let v_peakRel = f32x4.add(v_curPeak, f32x4.mul(f32x4.sub(v_blockPeak, v_curPeak), f32x4.splat(0.0001)));
+    const v_peakRel = f32x4.add(v_curPeak, f32x4.mul(f32x4.sub(v_blockPeak, v_curPeak), f32x4.splat(0.0001)));
     v_curPeak = f32x4.max(v_blockPeak, v_peakRel);
-    let v_rmsRel = f32x4.add(v_curRMS, f32x4.mul(f32x4.sub(v_blockRMS, v_curRMS), f32x4.splat(0.00005)));
+    const v_rmsRel = f32x4.add(v_curRMS, f32x4.mul(f32x4.sub(v_blockRMS, v_curRMS), f32x4.splat(0.000005)));
     v_curRMS = f32x4.max(v_blockRMS, v_rmsRel);
 
-    let v_safeRMS = f32x4.max(v_curRMS, f32x4.splat(0.005));
-    let expL = f32(Math.pow(f64(f32x4.extract_lane(v_curPeak, 0) / f32(0.5)), f64(expansionDepth - f32(1.0))));
-    let expR = f32(Math.pow(f64(f32x4.extract_lane(v_curPeak, 1) / f32(0.5)), f64(expansionDepth - f32(1.0))));
-    let v_expFact = pack2(expL, expR);
-    let v_rmsBoostRaw = f32x4.div(f32x4.splat(0.25), v_safeRMS);
-    let v_rmsBoost = f32x4.max(f32x4.splat(1.0), f32x4.min(v_rmsBoostRaw, f32x4.splat(2.0)));
-    let v_currentGain = f32x4.mul(v_expFact, v_rmsBoost);
+    const v_safeRMS = f32x4.max(v_curRMS, f32x4.splat(0.005));
+    const expL = f32(Math.pow(f64(f32x4.extract_lane(v_curPeak, 0) / f32(0.5)), f64(expansionDepth - f32(1.0))));
+    const expR = f32(Math.pow(f64(f32x4.extract_lane(v_curPeak, 1) / f32(0.5)), f64(expansionDepth - f32(1.0))));
+    const v_expFact = pack2(expL, expR);
+    const v_rmsBoostRaw = f32x4.div(f32x4.splat(0.25), v_safeRMS);
+    const v_rmsBoost = f32x4.max(f32x4.splat(1.0), f32x4.min(v_rmsBoostRaw, f32x4.splat(2.0)));
+    //    const v_currentGain = f32x4.mul(v_expFact, v_rmsBoost);
+    const v_currentGain = f32x4.min(f32x4.mul(v_expFact, v_rmsBoost), f32x4.splat(3.0));  // 最大3倍まで
 
     for (let i = 0; i < len; i++) {
-        v_lastGain = f32x4.add(v_lastGain, f32x4.mul(f32x4.sub(v_currentGain, v_lastGain), f32x4.splat(0.1)));
-        let v_inRaw = pack2(load<f32>(INPUT_L + i * 4), load<f32>(INPUT_R + i * 4));
-        let v_in = f32x4.mul(v_inRaw, v_lastGain);
+        v_lastGain = f32x4.add(v_lastGain, f32x4.mul(f32x4.sub(v_currentGain, v_lastGain), f32x4.splat(0.05)));
+        const v_in = f32x4.mul(pack2(load<f32>(INPUT_L + i * 4), load<f32>(INPUT_R + i * 4)), v_lastGain);
         store<f32>(HIST_L + writePos_L * 4, f32x4.extract_lane(v_in, 0));
         store<f32>(HIST_R + writePos_R * 4, f32x4.extract_lane(v_in, 1));
         const nPL = writePos_L; const nPR = writePos_R;
-        writePos_L = (writePos_L + 1) & (g_taps - 1);
-        writePos_R = (writePos_R + 1) & (g_taps - 1);
+        writePos_L = (writePos_L + 1) & g_tapsMask;
+        writePos_R = (writePos_R + 1) & g_tapsMask;
 
         // --- FIR + ΔΣ: j ループで4フェーズずつ全 oversample 処理 ---
         for (let j = 0; j < g_oversample; j += 4) {
@@ -273,27 +273,27 @@ export function process_simd(len: i32, expansionDepth: f32, exciteAmount: f32): 
             let v_accL = f32x4.splat(0);
             let v_accR = f32x4.splat(0);
             for (let k = 0; k < g_taps; k++) {
-                const hL = load<f32>(HIST_L + ((nPL - k + g_taps) & (g_taps - 1)) * 4);
-                const hR = load<f32>(HIST_R + ((nPR - k + g_taps) & (g_taps - 1)) * 4);
+                const hL = load<f32>(HIST_L + ((nPL - k + g_taps) & g_tapsMask) * 4);
+                const hR = load<f32>(HIST_R + ((nPR - k + g_taps) & g_tapsMask) * 4);
                 const v_c = load<v128>(SINC_PTR + (k * g_oversample + j) * 4);
                 v_accL = f32x4.add(v_accL, f32x4.mul(f32x4.splat(hL), v_c));
                 v_accR = f32x4.add(v_accR, f32x4.mul(f32x4.splat(hR), v_c));
             }
 
             // ΔΣ 4フェーズ アンロール（lane0=L, lane1=R）
-            processDeltaSigmaPhase(pack2(f32x4.extract_lane(v_accL, 0), f32x4.extract_lane(v_accR, 0)), v_hpState, exciteAmount);
+            processDeltaSigmaPhase(pack2(f32x4.extract_lane(v_accL, 0), f32x4.extract_lane(v_accR, 0)), exciteAmount);
             store<f32>(FB_BUF_L + (j + 0) * 4, f32x4.extract_lane(fb, 0));
             store<f32>(FB_BUF_R + (j + 0) * 4, f32x4.extract_lane(fb, 1));
 
-            processDeltaSigmaPhase(pack2(f32x4.extract_lane(v_accL, 1), f32x4.extract_lane(v_accR, 1)), v_hpState, exciteAmount);
+            processDeltaSigmaPhase(pack2(f32x4.extract_lane(v_accL, 1), f32x4.extract_lane(v_accR, 1)), exciteAmount);
             store<f32>(FB_BUF_L + (j + 1) * 4, f32x4.extract_lane(fb, 0));
             store<f32>(FB_BUF_R + (j + 1) * 4, f32x4.extract_lane(fb, 1));
 
-            processDeltaSigmaPhase(pack2(f32x4.extract_lane(v_accL, 2), f32x4.extract_lane(v_accR, 2)), v_hpState, exciteAmount);
+            processDeltaSigmaPhase(pack2(f32x4.extract_lane(v_accL, 2), f32x4.extract_lane(v_accR, 2)), exciteAmount);
             store<f32>(FB_BUF_L + (j + 2) * 4, f32x4.extract_lane(fb, 0));
             store<f32>(FB_BUF_R + (j + 2) * 4, f32x4.extract_lane(fb, 1));
 
-            processDeltaSigmaPhase(pack2(f32x4.extract_lane(v_accL, 3), f32x4.extract_lane(v_accR, 3)), v_hpState, exciteAmount);
+            processDeltaSigmaPhase(pack2(f32x4.extract_lane(v_accL, 3), f32x4.extract_lane(v_accR, 3)), exciteAmount);
             store<f32>(FB_BUF_L + (j + 3) * 4, f32x4.extract_lane(fb, 0));
             store<f32>(FB_BUF_R + (j + 3) * 4, f32x4.extract_lane(fb, 1));
         }
