@@ -155,7 +155,7 @@ export function init(taps: i32, oversample: i32, sampleRate: f32): void {
 
     b1 = f32x4.splat(f32(Math.pow(f64((f32(Math.PI) * f32(2 * 4000)) / sampleRate), 2)));
     b2 = f32x4.splat(f32(Math.pow(f64((f32(Math.PI) * f32(2 * 8000)) / sampleRate), 2)));
-    b3 = f32x4.splat(f32(Math.pow(f64((f32(Math.PI) * f32(2 * 14000)) / sampleRate), 2)));
+    b3 = f32x4.splat(f32(Math.pow(f64((f32(Math.PI) * f32(2 * 12000)) / sampleRate), 2)));
 
     // ハイパスフィルタの係数計算（カットオフ周波数 fc を指定）
     // 1次後退差分による簡易HPF係数// カットオフ周波数 Hz（1kHz）
@@ -251,14 +251,14 @@ export function process_simd(len: i32, expansionDepth: f32, exciteAmount: f32): 
     const v_rmsRel = f32x4.add(v_curRMS, f32x4.mul(f32x4.sub(v_blockRMS, v_curRMS), f32x4.splat(0.000005)));
     v_curRMS = f32x4.max(v_blockRMS, v_rmsRel);
 
-    const expL = f32(Math.pow(f64(f32x4.extract_lane(v_curPeak, 0) / f32(0.5)), f64(expansionDepth - f32(1.0))));
-    const expR = f32(Math.pow(f64(f32x4.extract_lane(v_curPeak, 1) / f32(0.5)), f64(expansionDepth - f32(1.0))));
+    const expL = f32(Math.pow(f64(f32x4.extract_lane(v_curPeak, 0) / f32(1.0)), f64(expansionDepth - f32(1.0))));
+    const expR = f32(Math.pow(f64(f32x4.extract_lane(v_curPeak, 1) / f32(1.0)), f64(expansionDepth - f32(1.0))));
     const v_rmsBoostRaw = f32x4.div(f32x4.splat(0.25), v_curRMS);
-    const v_rmsBoost = f32x4.max(f32x4.splat(1.0), f32x4.min(v_rmsBoostRaw, f32x4.splat(2.0)));
+    const v_rmsBoost = f32x4.max(f32x4.splat(1.0), f32x4.min(v_rmsBoostRaw, f32x4.splat(1.8)));
     const v_currentGain = f32x4.mul(pack2(expL, expR), v_rmsBoost);
 
     for (let i = 0; i < len; i++) {
-        v_lastGain = f32x4.add(v_lastGain, f32x4.mul(f32x4.sub(v_currentGain, v_lastGain), f32x4.splat(0.05)));
+        v_lastGain = f32x4.add(v_lastGain, f32x4.mul(f32x4.sub(v_currentGain, v_lastGain), f32x4.splat(0.005)));
         const v_in = f32x4.mul(pack2(load<f32>(INPUT_L + i * 4), load<f32>(INPUT_R + i * 4)), v_lastGain);
         store<f32>(HIST_L + writePos_L * 4, f32x4.extract_lane(v_in, 0));
         store<f32>(HIST_R + writePos_R * 4, f32x4.extract_lane(v_in, 1));
