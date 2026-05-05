@@ -14,8 +14,8 @@ class DeltaSigmaProcessor extends AudioWorkletProcessor {
         // ユーザーが後から変更可能なパラメータ
         this.params = {
             taps: 128,      //2のべき乗(...32, 64, 128)以外では動作しない（ビット演算を使用しているため）
-            oversample: 256,  //44.1kHz(48kHz)を基準とした倍率
-            expansionDepth: 1.15,
+            oversample: 128,  //44.1kHz(48kHz)を基準とした倍率
+            expansionDepth: 0.2,
             exciteAmount: 0.10,
         };
 

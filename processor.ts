@@ -17,10 +17,10 @@
 const W1 = f32x4.splat(0.90); const W2 = f32x4.splat(0.75); const W3 = f32x4.splat(0.25);
 const W4 = f32x4.splat(0.18); const W5 = f32x4.splat(0.12); const W6 = f32x4.splat(0.07); const W7 = f32x4.splat(0.05);
 
-const G1 = f32x4.splat(0.80);
-const G2 = f32x4.mul(G1, f32x4.splat(0.75));
-const G3 = f32x4.mul(G2, f32x4.splat(0.55));
-const G4 = f32x4.mul(G3, f32x4.splat(0.35));
+const G1 = f32x4.splat(1.20);
+const G2 = f32x4.mul(G1, f32x4.splat(0.80));
+const G3 = f32x4.mul(G2, f32x4.splat(0.60));
+const G4 = f32x4.mul(G3, f32x4.splat(0.40));
 const G5 = f32x4.mul(G4, f32x4.splat(0.20));
 const G6 = f32x4.mul(G5, f32x4.splat(0.15));
 const G7 = f32x4.mul(G6, f32x4.splat(0.10));
@@ -248,13 +248,13 @@ export function process_simd(len: i32, expansionDepth: f32, exciteAmount: f32): 
     // AGC Update
     const v_peakRel = f32x4.add(v_curPeak, f32x4.mul(f32x4.sub(v_blockPeak, v_curPeak), f32x4.splat(0.0001)));
     v_curPeak = f32x4.max(v_blockPeak, v_peakRel);
-    const v_rmsRel = f32x4.add(v_curRMS, f32x4.mul(f32x4.sub(v_blockRMS, v_curRMS), f32x4.splat(0.000005)));
+    const v_rmsRel = f32x4.add(v_curRMS, f32x4.mul(f32x4.sub(v_blockRMS, v_curRMS), f32x4.splat(0.00005)));
     v_curRMS = f32x4.max(v_blockRMS, v_rmsRel);
 
-    const expL = f32(Math.pow(f64(f32x4.extract_lane(v_curPeak, 0) / f32(1.0)), f64(expansionDepth - f32(1.0))));
-    const expR = f32(Math.pow(f64(f32x4.extract_lane(v_curPeak, 1) / f32(1.0)), f64(expansionDepth - f32(1.0))));
+    const expL = f32(Math.pow(f64(f32x4.extract_lane(v_curPeak, 0) / f32(0.8)), f64(expansionDepth)));
+    const expR = f32(Math.pow(f64(f32x4.extract_lane(v_curPeak, 1) / f32(0.8)), f64(expansionDepth)));
     const v_rmsBoostRaw = f32x4.div(f32x4.splat(0.25), v_curRMS);
-    const v_rmsBoost = f32x4.max(f32x4.splat(1.0), f32x4.min(v_rmsBoostRaw, f32x4.splat(1.8)));
+    const v_rmsBoost = f32x4.max(f32x4.splat(1.0), f32x4.min(v_rmsBoostRaw, f32x4.splat(2.0)));
     const v_currentGain = f32x4.mul(pack2(expL, expR), v_rmsBoost);
 
     for (let i = 0; i < len; i++) {
@@ -298,9 +298,7 @@ export function process_simd(len: i32, expansionDepth: f32, exciteAmount: f32): 
         }
 
         // Robust NaN and divergence protection
-        const i1_L = Math.abs(f32x4.extract_lane(i1, 0));
-        const i1_R = Math.abs(f32x4.extract_lane(i1, 1));
-        if (isNaN(i1_L) || isNaN(i1_R) || i1_L > 1000.0 || i1_R > 1000.0) {
+        if (isNaN(f32x4.extract_lane(i1, 0)) || isNaN(f32x4.extract_lane(i1, 1))) {
             i1 = i2 = i3 = i4 = i5 = i6 = i7 = fb = v_hpState = f32x4.splat(0);
         }
 
